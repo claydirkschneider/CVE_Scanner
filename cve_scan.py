@@ -24,10 +24,17 @@ import socket
 import sys
 from datetime import datetime, timezone
 
+import logging
+
 try:
     import paramiko
 except ImportError:
     sys.exit("paramiko is required. Install with: pip install paramiko")
+
+# Paramiko logs handshake failures (e.g. "Error reading SSH protocol banner")
+# as tracebacks from its transport thread. We already surface those hosts as
+# 'ssh_error', so silence paramiko's own logging to keep output readable.
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 
 CVE_ID = "CVE-2026-98432"
@@ -228,28 +235,36 @@ def mitigation_check(run, osinfo: dict) -> dict:
         return {"status": "not_applicable",
                 "details": [{"note": "no mitigation check defined for this OS"}]}
 
-    _, mptcp, _ = run("sysctl -n net.mptcp.enabled 2>/dev/null")
-    _, migrate, _ = run("sysctl -n net.ipv4.tcp_migrate_req 2>/dev/null")
-    code, nlisten, _ = run("ss -H -lMn 2>/dev/null | wc -l")
+    # Read the kernel knobs straight from /proc. `sysctl`/`ss` live in /usr/sbin,
+    # which isn't always on a non-login SSH PATH (Debian especially), so calling
+    # them by name reads empty on some hosts. /proc is PATH-proof and the files
+    # are world-readable when the feature exists.
+    _, mptcp, _ = run("cat /proc/sys/net/mptcp/enabled 2>/dev/null")
+    _, migrate, _ = run("cat /proc/sys/net/ipv4/tcp_migrate_req 2>/dev/null")
+    _, nlisten, _ = run("PATH=/usr/sbin:/sbin:$PATH ss -H -lMn 2>/dev/null | wc -l")
     try:
         listeners = int(nlisten.strip())
     except (ValueError, AttributeError):
         listeners = None
 
-    info = {"net.mptcp.enabled": mptcp.strip() or "unknown",
-            "net.ipv4.tcp_migrate_req": migrate.strip() or "unknown",
+    m = mptcp.strip()
+    info = {"net.mptcp.enabled": m or "absent",
+            "net.ipv4.tcp_migrate_req": migrate.strip() or "absent",
             "mptcp_listeners": listeners}
 
-    if mptcp.strip() == "0":
+    if m == "0":
         return {"status": "mitigated",
                 "details": [{**info, "note": "MPTCP disabled (workaround applied; "
                                              "not a substitute for a patched kernel)"}]}
-    if mptcp.strip() == "1":
+    if m == "1":
         note = ("MPTCP enabled with active listener(s)" if listeners
                 else "MPTCP enabled (new sockets allowed)")
         return {"status": "not_mitigated", "details": [{**info, "note": note}]}
-    return {"status": "review",
-            "details": [{**info, "note": "could not read net.mptcp.enabled"}]}
+    # Knob absent -> this kernel has no MPTCP support, so the MPTCP RCE path
+    # doesn't apply (the IPv4 DoS/mem-corruption path still depends on the patch).
+    return {"status": "not_applicable",
+            "details": [{**info, "note": "kernel has no MPTCP support "
+                                         "(net.mptcp.enabled absent)"}]}
 
 
 def ssh_exec(client: paramiko.SSHClient, cmd: str, timeout: int = 15):
