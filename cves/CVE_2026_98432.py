@@ -33,6 +33,17 @@ PVE_FIXED = {
     "7.0.14": "7.0.14-25-pve",
 }
 
+# Proxmox kernel series that are affected with NO vendor fix (end of life) ->
+# report vulnerable, not review. Proxmox VE 8 (6.8 / 6.14 kernels) reached EOL in
+# Aug 2026 and did not receive a CVE-2026-98432 fix; remediation is upgrading to
+# Proxmox VE 9 (kernel 7.0.14-25-pve or newer).
+PVE_NO_FIX = {
+    "6.8.12": "Proxmox VE 8 (6.8 kernel) is EOL (Aug 2026); no fixed kernel — "
+              "upgrade to Proxmox VE 9 (kernel 7.0.14-25-pve or newer)",
+    "6.14":   "Proxmox VE 8 (6.14 kernel) is EOL; no fixed kernel — upgrade to "
+              "Proxmox VE 9 (kernel 7.0.14-25-pve or newer)",
+}
+
 # FreeBSD base system via `freebsd-version`. EMPTY because FreeBSD is NOT affected
 # by this CVE; shape shown for the next CVE that does hit the FreeBSD base.
 FREEBSD_FIXED = {
@@ -45,15 +56,20 @@ def _check_ubuntu(run, osinfo):
     _, krel, _ = run("uname -r")  # e.g. 5.15.0-125-generic
 
     if krel.endswith("-pve"):     # Proxmox VE kernel
+        series = krel.split("-")[0]
         base = {"kernel": krel, "platform": "Proxmox VE", "advisory": ADVISORY_URL}
-        fixed = PVE_FIXED.get(krel.split("-")[0])
-        if fixed is None:
-            return {"status": "review",
-                    "details": [{**base, "note": "Proxmox kernel series not in "
-                                                 "PVE_FIXED — verify against Proxmox repos"}]}
-        vulnerable = version_less_than(run, osinfo["family"], krel, fixed)
-        return {"status": "vulnerable" if vulnerable else "ok",
-                "details": [{**base, "fixed_version": fixed}]}
+        fixed = PVE_FIXED.get(series)
+        if fixed is not None:
+            vulnerable = version_less_than(run, osinfo["family"], krel, fixed)
+            return {"status": "vulnerable" if vulnerable else "ok",
+                    "details": [{**base, "fixed_version": fixed}]}
+        if series in PVE_NO_FIX:   # affected, EOL, no fix -> vulnerable
+            return {"status": "vulnerable",
+                    "details": [{**base, "note": PVE_NO_FIX[series]}]}
+        return {"status": "review",
+                "details": [{**base, "note": "Proxmox kernel series not in "
+                                             "PVE_FIXED/PVE_NO_FIX — verify against "
+                                             "Proxmox repos"}]}
 
     code, pkgver, _ = run(f"dpkg-query -W -f='${{Version}}' linux-image-{krel} 2>/dev/null")
     pkgver = pkgver if (code == 0 and pkgver) else None
@@ -176,10 +192,14 @@ namespace, so containers need it set in their own namespace.
 
 # Proxmox VE
 
-The Proxmox kernel carries the fix from **7.0.14-25-pve** onward (built on the
-Ubuntu 7.0.0-43 source); 7.0.14-24-pve and earlier do not. Update from the
-no-subscription or test repository and reboot - `uname -r` at 7.0.14-25-pve or
-newer is fixed.
+Proxmox VE 9 (7.0.14 kernel line) carries the fix from **7.0.14-25-pve** onward
+(built on the Ubuntu 7.0.0-43 source); 7.0.14-24-pve and earlier do not. Update
+from the no-subscription or test repository and reboot - `uname -r` at
+7.0.14-25-pve or newer is fixed.
+
+**Proxmox VE 8 (6.8 / 6.14 kernels) reached end of life in August 2026 and did
+not receive a fix.** Those hosts stay vulnerable until upgraded to Proxmox VE 9
+(kernel 7.0.14-25-pve or newer).
 
 # Not affected
 
