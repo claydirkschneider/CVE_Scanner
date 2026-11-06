@@ -41,6 +41,7 @@ That writes `audit.json` and `audit.csv` in the current directory.
 | `--workers`, `-w` | `20` | Concurrent hosts |
 | `--timeout`, `-t` | `8` | Per-connection / port-check timeout (seconds) |
 | `--output`, `-o` | `cve_scan_results` | Output file prefix |
+| `--mitigation-check` | *(off)* | Also run the `mitigation_check()` hook per host (workaround/exposure posture, independent of patch status) |
 
 ## 3. What you get back
 
@@ -80,6 +81,21 @@ The currently shipped check is **CVE-2026-98432** (Linux kernel IPv4 TCP
 use-after-free). FreeBSD is reported `not_applicable` because it's a Linux-kernel
 bug; Ubuntu hosts are checked against `UBUNTU_FIXED`, which you populate from
 <https://ubuntu.com/security/CVE-2026-98432>.
+
+### Optional: mitigation check
+
+Some CVEs have a workaround you can apply while a vendor patch is pending (a
+sysctl, an nftables rule, a disabled feature). That's **separate from patch
+status** — a workaround lowers exposure but doesn't mean the bug is gone. There's
+a second, optional hook for this, `mitigation_check(run, osinfo)`, with the exact
+same contract as `cve_check`. It runs only with `--mitigation-check`, and its
+result is recorded per host (`mitigation` in the JSON; two extra columns in the
+CSV) alongside — never instead of — the CVE verdict.
+
+Like `cve_check`, it's generic: replace its body per CVE. The shipped version
+reports MPTCP exposure (the CVE-2026-98432 workaround), with statuses
+`mitigated` / `not_mitigated` / `not_applicable`. Keep your `vulnerable`/`ok`
+verdict driven by the kernel version, not by the mitigation state.
 
 ---
 
@@ -209,6 +225,13 @@ def cve_check(run, osinfo):
 Where to paste the result: replace the function under the banner
 `#### CVE CHECK — PASTE / REPLACE THIS FUNCTION PER CVE ####` in `cve_scan.py`,
 and update `CVE_ID` at the top so the output labels the right CVE.
+
+**Optional mitigation hook.** The same contract and the same helpers apply to
+`mitigation_check(run, osinfo)` (banner `#### MITIGATION CHECK ####`), which runs
+only under `--mitigation-check` and reports workaround/exposure posture rather
+than patch status. Suggested statuses: `mitigated`, `not_mitigated`,
+`not_applicable`, `review`, `error`. If you want an AI to write it too, ask for a
+`mitigation_check` with these statuses — everything else above is identical.
 
 ---
 

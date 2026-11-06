@@ -203,6 +203,55 @@ def cve_check(run, osinfo: dict) -> dict:
 # ##########################################################################
 
 
+# ##########################################################################
+# ####  MITIGATION CHECK  —  OPTIONAL, PASTE / REPLACE PER CVE  ############
+# ##########################################################################
+#
+# Runs only when --mitigation-check is passed. Same contract as cve_check:
+#   mitigation_check(run, osinfo) -> {"status": <str>, "details": [...]}
+# Reports the MITIGATION / EXPOSURE posture of a host, independent of whether
+# the kernel/package is patched. Useful while a vendor fix is pending and you're
+# relying on a workaround (a sysctl, an nftables rule, a disabled feature).
+#
+# Suggested statuses:
+#   "mitigated"      workaround is in place
+#   "not_mitigated"  workaround is absent / exposed
+#   "not_applicable" no mitigation concept for this OS/CVE
+#   "review" / "error"
+#
+# Replace the body per CVE. The shipped version reports MPTCP exposure, the
+# workaround for CVE-2026-98432 (not a fix — see the advisory).
+# --------------------------------------------------------------------------
+def mitigation_check(run, osinfo: dict) -> dict:
+    family = osinfo["family"]
+    if family not in ("ubuntu", "debian", "linux"):
+        return {"status": "not_applicable",
+                "details": [{"note": "no mitigation check defined for this OS"}]}
+
+    _, mptcp, _ = run("sysctl -n net.mptcp.enabled 2>/dev/null")
+    _, migrate, _ = run("sysctl -n net.ipv4.tcp_migrate_req 2>/dev/null")
+    code, nlisten, _ = run("ss -H -lMn 2>/dev/null | wc -l")
+    try:
+        listeners = int(nlisten.strip())
+    except (ValueError, AttributeError):
+        listeners = None
+
+    info = {"net.mptcp.enabled": mptcp.strip() or "unknown",
+            "net.ipv4.tcp_migrate_req": migrate.strip() or "unknown",
+            "mptcp_listeners": listeners}
+
+    if mptcp.strip() == "0":
+        return {"status": "mitigated",
+                "details": [{**info, "note": "MPTCP disabled (workaround applied; "
+                                             "not a substitute for a patched kernel)"}]}
+    if mptcp.strip() == "1":
+        note = ("MPTCP enabled with active listener(s)" if listeners
+                else "MPTCP enabled (new sockets allowed)")
+        return {"status": "not_mitigated", "details": [{**info, "note": note}]}
+    return {"status": "review",
+            "details": [{**info, "note": "could not read net.mptcp.enabled"}]}
+
+
 def ssh_exec(client: paramiko.SSHClient, cmd: str, timeout: int = 15):
     stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
     out = stdout.read().decode(errors="replace").strip()
@@ -239,7 +288,7 @@ def port_open(host: str, port: int, timeout: float) -> bool:
         return False
 
 
-def scan_host(host, port, username, password, timeout) -> dict:
+def scan_host(host, port, username, password, timeout, mitigation=False) -> dict:
     """Always returns a record. 'state' says what happened to this IP."""
     result = {"host": host, "scanned_at": datetime.now(timezone.utc).isoformat(),
               "state": None}
@@ -276,6 +325,11 @@ def scan_host(host, port, username, password, timeout) -> dict:
             result["cve_check"] = cve_check(run, osinfo)
         except Exception as e:  # a bad pasted check shouldn't kill the host record
             result["cve_check"] = {"status": "error", "details": [str(e)]}
+        if mitigation:
+            try:
+                result["mitigation"] = mitigation_check(run, osinfo)
+            except Exception as e:
+                result["mitigation"] = {"status": "error", "details": [str(e)]}
         result["state"] = "logged_in"
         return result
     except Exception as e:  # noqa: BLE001
@@ -315,6 +369,9 @@ def main() -> None:
     ap.add_argument("--timeout", "-t", type=int, default=8,
                     help="Per-connection/port timeout, seconds (default 8).")
     ap.add_argument("--output", "-o", default="cve_scan_results")
+    ap.add_argument("--mitigation-check", action="store_true",
+                    help="Also run the mitigation_check() hook per host "
+                         "(exposure/workaround posture, independent of patch status).")
     args = ap.parse_args()
 
     password = os.environ.get(args.password_env)
@@ -329,7 +386,8 @@ def main() -> None:
     results: list[dict] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {
-            ex.submit(scan_host, h, args.port, args.username, password, args.timeout): h
+            ex.submit(scan_host, h, args.port, args.username, password,
+                      args.timeout, args.mitigation_check): h
             for h in targets
         }
         for fut in concurrent.futures.as_completed(futures):
@@ -340,8 +398,11 @@ def main() -> None:
             # 'port_closed' is the noisy common case -> kept in files, not on screen.
             if state == "logged_in":
                 status = res.get("cve_check", {}).get("status", "?")
+                extra = ""
+                if args.mitigation_check:
+                    extra = f" MIT:{res.get('mitigation', {}).get('status', '?')}"
                 print(f"[+] {res['host']:<16} {state:<12} {res.get('os','?'):<26} "
-                      f"{res.get('version',''):<14} CVE:{status}", file=sys.stderr)
+                      f"{res.get('version',''):<14} CVE:{status}{extra}", file=sys.stderr)
             elif state in ("ssh_error", "info_error", "auth_failed"):
                 print(f"[-] {res['host']:<16} {state}", file=sys.stderr)
             # port_closed: silent on screen
@@ -363,15 +424,23 @@ def main() -> None:
     csv_path = f"{args.output}.csv"
     with open(csv_path, "w", newline="") as f:
         wr = csv.writer(f)
-        wr.writerow(["host", "state", "os", "version", "family",
-                     "cve", "cve_status", "details"])
+        header = ["host", "state", "os", "version", "family",
+                  "cve", "cve_status", "details"]
+        if args.mitigation_check:
+            header += ["mitigation_status", "mitigation_details"]
+        wr.writerow(header)
         for r in results:
             cc = r.get("cve_check", {})
-            wr.writerow([
+            row = [
                 r["host"], r.get("state", ""), r.get("os", ""), r.get("version", ""),
                 r.get("family", ""), r.get("cve", "") if r.get("state") == "logged_in" else "",
                 cc.get("status", ""), json.dumps(cc.get("details", [])) if cc else "",
-            ])
+            ]
+            if args.mitigation_check:
+                mit = r.get("mitigation", {})
+                row += [mit.get("status", ""),
+                        json.dumps(mit.get("details", [])) if mit else ""]
+            wr.writerow(row)
 
     # Summary counts by state
     counts: dict[str, int] = {}
