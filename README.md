@@ -128,14 +128,36 @@ the version evidence behind each verdict. Only hosts that were logged into are
 assessed — unreachable IPs count toward scope but get no CVE verdict, so a true
 all-clear means the fleet is both reachable and `ok`/`not_applicable`.
 
+### Including the known fix
+
+The report can render a **"Known fix & remediation"** section from a markdown
+file, so the exec sees what the fix is, not just the status. The text comes from,
+in order of precedence:
+
+1. `--fix "inline text"`
+2. `--fix-file path.md`
+3. a `remediation.md` sitting next to the JSON (auto-detected; nothing to pass)
+
+If none is found the section is simply omitted. A small markdown subset is
+rendered (`#`/`##`/`###` headings, `-`/`*` bullets, ``` fenced code blocks ```,
+and links). The repo ships a `remediation.md` filled in for CVE-2026-98432 (the
+patched-kernel fix, the interim MPTCP mitigation, and the FreeBSD "not affected"
+note); edit that one file per CVE — `make_report.py` itself never changes. Unlike
+the scan outputs, `remediation.md` holds no host data and **should** be committed.
+
+```bash
+python3 make_report.py audit.json --org "Your Team" --fix-file remediation.md
+```
+
 ---
 
 ## 6. SPEC: generating a `cve_check` with an AI assistant
 
 > Paste this whole section (section 6) into an AI chat along with the CVE you
-> want. Ask it to **return only a Python `cve_check` function** (and, if useful,
-> values for the fixed-version tables and the `CVE_ID` constant). Do **not** let
-> it rewrite the rest of `cve_scan.py` — you only swap this one function.
+> want. Ask it for **two things**: (1) a Python `cve_check` function (and, if
+> useful, values for the fixed-version tables and the `CVE_ID` constant), and
+> (2) a `remediation.md` file with the known fix. Do **not** let it rewrite the
+> rest of `cve_scan.py` — you only swap the one function and drop in the markdown.
 
 **Task for the AI:** Write a Python function `cve_check(run, osinfo)` that decides
 whether a remote host is affected by a given CVE, using only the interface below.
@@ -232,6 +254,23 @@ only under `--mitigation-check` and reports workaround/exposure posture rather
 than patch status. Suggested statuses: `mitigated`, `not_mitigated`,
 `not_applicable`, `review`, `error`. If you want an AI to write it too, ask for a
 `mitigation_check` with these statuses — everything else above is identical.
+
+### Second deliverable: `remediation.md`
+
+Along with the check, produce a `remediation.md` describing the **known fix** for
+this CVE. It's rendered into the exec report (section 5) and should read cleanly
+both as a plain file and when rendered. Rules:
+
+- Use only this markdown subset: `#` / `##` / `###` headings, `-` or `*` bullets,
+  ```` ``` ```` fenced code blocks for commands, and `[text](url)` or bare links.
+- Structure it as: the real fix first (the patched package/version and how to
+  apply it, per affected OS, with the vendor advisory link), then any interim
+  mitigation clearly labelled as **not a fix**, then a line for each OS family in
+  the fleet that is **not affected** (e.g. FreeBSD for a Linux-only CVE).
+- State facts you can cite from the advisory; don't invent fixed version numbers.
+  If a distro's fix is still pending, say so and link its tracker rather than
+  guessing.
+- No host-specific data — it's generic guidance that gets committed to the repo.
 
 ---
 

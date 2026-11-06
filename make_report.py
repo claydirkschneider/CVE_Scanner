@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
+import re
 import sys
 from collections import Counter
 from datetime import datetime
@@ -35,6 +37,64 @@ ASSESSED = {"vulnerable", "ok", "review", "not_applicable", "error"}
 
 def esc(x) -> str:
     return html.escape("" if x is None else str(x))
+
+
+def _inline(text: str) -> str:
+    """Escape, then re-apply `code` spans and [text](url) links."""
+    out = esc(text)
+    out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+    out = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)",
+                 r'<a href="\2">\1</a>', out)
+    # bare URLs
+    out = re.sub(r"(?<![\">])(https?://[^\s<]+)", r'<a href="\1">\1</a>', out)
+    return out
+
+
+def render_md(text: str) -> str:
+    """Tiny markdown-lite -> HTML: #/##/### headings, - bullets, ``` code, links."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    html_parts, in_code, in_list, para = [], False, False, []
+
+    def flush_para():
+        if para:
+            html_parts.append(f"<p>{' '.join(_inline(p) for p in para)}</p>")
+            para.clear()
+
+    def close_list():
+        nonlocal in_list
+        if in_list:
+            html_parts.append("</ul>")
+            in_list = False
+
+    for ln in lines:
+        if ln.strip().startswith("```"):
+            flush_para(); close_list()
+            if in_code:
+                html_parts.append("</code></pre>"); in_code = False
+            else:
+                html_parts.append('<pre><code>'); in_code = True
+            continue
+        if in_code:
+            html_parts.append(esc(ln))
+            continue
+        if not ln.strip():
+            flush_para(); close_list(); continue
+        m = re.match(r"(#{1,3})\s+(.*)", ln)
+        if m:
+            flush_para(); close_list()
+            html_parts.append(f"<h4>{_inline(m.group(2))}</h4>")
+            continue
+        if re.match(r"\s*[-*]\s+", ln):
+            flush_para()
+            if not in_list:
+                html_parts.append("<ul>"); in_list = True
+            html_parts.append(f"<li>{_inline(re.sub(r'^\s*[-*]\s+', '', ln))}</li>")
+            continue
+        para.append(ln.strip())
+    flush_para(); close_list()
+    if in_code:
+        html_parts.append("</code></pre>")
+    return "\n".join(html_parts)
 
 
 def summarize_details(cc: dict) -> str:
@@ -62,7 +122,8 @@ def summarize_details(cc: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in d.items())
 
 
-def build(records: list[dict], cve: str, org: str, prepared_by: str) -> str:
+def build(records: list[dict], cve: str, org: str, prepared_by: str,
+          fix_html: str = "") -> str:
     total = len(records)
     states = Counter(r.get("state", "unknown") for r in records)
     audited = [r for r in records if r.get("state") == "logged_in"]
@@ -155,6 +216,12 @@ def build(records: list[dict], cve: str, org: str, prepared_by: str) -> str:
         tile("Needs review", n_review + n_err, "warning" if (n_review + n_err) else None),
     ])
 
+    fix_section = ""
+    if fix_html:
+        fix_section = f"""
+  <h3>Known fix &amp; remediation</h3>
+  <div class="fixbox">{fix_html}</div>"""
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -209,6 +276,17 @@ def build(records: list[dict], cve: str, org: str, prepared_by: str) -> str:
   .pill.muted {{ background:#d9d8d2; color:#52514e; }}
   .cols {{ display:grid; grid-template-columns:1fr 1fr; gap:24px; align-items:start; }}
   .legend {{ color:var(--ink2); font-size:13px; line-height:1.7; margin-top:8px; }}
+  .fixbox {{ background:var(--surface); border:1px solid var(--grid);
+    border-left:4px solid var(--good); border-radius:12px; padding:4px 20px 14px; }}
+  .fixbox h4 {{ font-size:14px; margin:18px 0 6px; color:var(--ink); }}
+  .fixbox p {{ margin:8px 0; color:var(--ink2); font-size:14px; }}
+  .fixbox ul {{ margin:8px 0; padding-left:20px; color:var(--ink2); font-size:14px; }}
+  .fixbox li {{ margin:3px 0; }}
+  .fixbox pre {{ background:#f4f4f1; border:1px solid var(--grid); border-radius:8px;
+    padding:12px 14px; overflow-x:auto; font-size:13px; }}
+  .fixbox code {{ font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }}
+  .fixbox pre code {{ white-space:pre; }}
+  .fixbox a {{ color:#1c5cab; }}
   footer {{ color:var(--muted); font-size:12px; margin-top:36px;
     border-top:1px solid var(--grid); padding-top:16px; }}
   @media print {{
@@ -231,7 +309,7 @@ def build(records: list[dict], cve: str, org: str, prepared_by: str) -> str:
   </div>
 
   <div class="tiles">{tiles}</div>
-
+{fix_section}
   <div class="cols">
     <div>
       <h3>Hosts by operating system (audited)</h3>
@@ -275,6 +353,9 @@ def main() -> None:
     ap.add_argument("--cve", help="Override the CVE title (else taken from the data)")
     ap.add_argument("--org", default="", help="Organization name for the header")
     ap.add_argument("--prepared-by", default="", help="Name for the header byline")
+    ap.add_argument("--fix-file", help="Markdown file with the known fix / remediation "
+                    "(defaults to remediation.md next to the data, if present)")
+    ap.add_argument("--fix", help="Inline remediation text (overrides --fix-file)")
     args = ap.parse_args()
 
     try:
@@ -288,8 +369,27 @@ def main() -> None:
     cve = args.cve or next(
         (r.get("cve") for r in records if r.get("cve")), "CVE")
 
+    # Resolve the remediation text: --fix, else --fix-file, else a sibling
+    # remediation.md if one exists. Rendered as a section when non-empty.
+    fix_md = ""
+    if args.fix:
+        fix_md = args.fix
+    else:
+        fix_path = args.fix_file
+        if not fix_path:
+            sibling = os.path.join(os.path.dirname(os.path.abspath(args.json)),
+                                   "remediation.md")
+            fix_path = sibling if os.path.exists(sibling) else None
+        if fix_path:
+            try:
+                with open(fix_path) as f:
+                    fix_md = f.read()
+            except OSError as e:
+                print(f"[!] Could not read fix file {fix_path}: {e}", file=sys.stderr)
+    fix_html = render_md(fix_md) if fix_md.strip() else ""
+
     out = args.output or (args.json.rsplit(".", 1)[0] + "_report.html")
-    html_doc = build(records, cve, args.org, args.prepared_by)
+    html_doc = build(records, cve, args.org, args.prepared_by, fix_html)
     with open(out, "w") as f:
         f.write(html_doc)
 
