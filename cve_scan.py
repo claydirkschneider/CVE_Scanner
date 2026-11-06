@@ -164,7 +164,10 @@ def main() -> None:
     ap.add_argument("--workers", "-w", type=int, default=20)
     ap.add_argument("--timeout", "-t", type=int, default=8,
                     help="Per-connection/port timeout, seconds (default 8).")
-    ap.add_argument("--output", "-o", default="cve_scan_results")
+    ap.add_argument("--output", "-o", default=None,
+                    help="Output prefix. The CVE ID is always appended, so "
+                         "'-o audit' -> audit_CVE-XXXX.{json,csv}. Default: the "
+                         "CVE ID alone, e.g. CVE-2026-109518.json.")
     ap.add_argument("--mitigation-check", action="store_true",
                     help="Also run the definition's mitigation_check() per host "
                          "(exposure/workaround posture, independent of patch status).")
@@ -175,6 +178,7 @@ def main() -> None:
     except (FileNotFoundError, AttributeError) as e:
         sys.exit(f"[!] {e}")
     cve_id = cve_mod.CVE_ID
+    out_stem = f"{args.output}_{cve_id}" if args.output else cve_id
 
     if args.mitigation_check and not hasattr(cve_mod, "mitigation_check"):
         print(f"[!] {cve_id} has no mitigation_check(); --mitigation-check ignored.",
@@ -219,11 +223,11 @@ def main() -> None:
             return (1, (h,))
     results.sort(key=sort_key)
 
-    json_path = f"{args.output}.json"
+    json_path = f"{out_stem}.json"
     with open(json_path, "w") as f:
         json.dump(results, f, indent=2)
 
-    csv_path = f"{args.output}.csv"
+    csv_path = f"{out_stem}.csv"
     with open(csv_path, "w", newline="") as f:
         wr = csv.writer(f)
         header = ["host", "state", "os", "version", "family",
@@ -248,7 +252,7 @@ def main() -> None:
     rem_path = None
     remediation = getattr(cve_mod, "REMEDIATION", "")
     if remediation.strip():
-        rem_path = f"{args.output}.remediation.md"
+        rem_path = f"{out_stem}.remediation.md"
         with open(rem_path, "w") as f:
             f.write(remediation)
 

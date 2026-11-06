@@ -44,8 +44,11 @@ export SSH_PASSWORD='your-password'
 python3 cve_scan.py --cve CVE-2026-109518 --subnet 10.0.0.0/24 --username admin --output audit
 ```
 
-That writes `audit.json`, `audit.csv`, and `audit.remediation.md` in the current
-directory. `--cve CVE-2026-109518` loads `cves/CVE_2026_109518.py`.
+That writes `audit_CVE-2026-109518.json`, `.csv`, and `.remediation.md` in the
+current directory — the CVE is always part of the filename, so scans for
+different CVEs never collide. `--cve CVE-2026-109518` loads
+`cves/CVE_2026_109518.py`. With no `--output`, files are named for the CVE alone
+(`CVE-2026-109518.json`).
 
 ### Common options
 
@@ -59,7 +62,7 @@ directory. `--cve CVE-2026-109518` loads `cves/CVE_2026_109518.py`.
 | `--port`, `-p` | `22` | Port to test and connect on |
 | `--workers`, `-w` | `20` | Concurrent hosts |
 | `--timeout`, `-t` | `8` | Per-connection / port-check timeout (seconds) |
-| `--output`, `-o` | `cve_scan_results` | Output file prefix |
+| `--output`, `-o` | *(CVE ID)* | Output prefix; the CVE ID is always appended (`-o audit` → `audit_CVE-XXXX.json`). Default is the CVE ID alone |
 | `--mitigation-check` | *(off)* | Also run the definition's `mitigation_check()` per host (workaround/exposure posture, independent of patch status) |
 
 ## 3. What you get back
@@ -139,11 +142,12 @@ security exec. Intended to be run **once the fixes are in**, to show the CVE is
 remediated across the fleet.
 
 ```bash
-python3 make_report.py audit.json --org "Your Team" --prepared-by "Your Name"
+python3 make_report.py audit_CVE-2026-109518.json --org "Your Team" --prepared-by "Your Name"
 ```
 
-Writes `audit_report.html` next to the input (override with `-o`). Open it in a
-browser, or print to PDF to share.
+Writes `audit_CVE-2026-109518_report.html` next to the input (override with
+`-o`). Open it in a browser, or print to PDF to share. The CVE-named sidecar the
+scanner wrote (`audit_CVE-2026-109518.remediation.md`) is auto-detected.
 
 | Flag | Meaning |
 |------|---------|
