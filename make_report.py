@@ -377,9 +377,15 @@ def main() -> None:
     else:
         fix_path = args.fix_file
         if not fix_path:
-            sibling = os.path.join(os.path.dirname(os.path.abspath(args.json)),
-                                   "remediation.md")
-            fix_path = sibling if os.path.exists(sibling) else None
+            # Prefer the scanner's sidecar (<input>.remediation.md), then a
+            # generic remediation.md next to the data.
+            stem = args.json.rsplit(".", 1)[0]
+            data_dir = os.path.dirname(os.path.abspath(args.json))
+            for cand in (f"{stem}.remediation.md",
+                         os.path.join(data_dir, "remediation.md")):
+                if os.path.exists(cand):
+                    fix_path = cand
+                    break
         if fix_path:
             try:
                 with open(fix_path) as f:

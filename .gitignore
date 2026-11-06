@@ -5,6 +5,9 @@ audit.*
 *_report.html
 *.json
 *.csv
+# Generated remediation sidecars (e.g. audit.remediation.md). The canonical
+# remediation text lives inside each cves/<CVE>.py as REMEDIATION.
+*.remediation.md
 
 # Keep the scripts and docs tracked; the broad *.json/*.csv rules above are
 # intentional for this repo (there are no source .json/.csv files to track).
