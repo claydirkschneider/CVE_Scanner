@@ -1,0 +1,17 @@
+# Scan outputs — contain real host inventory (IPs, OS, versions, which hosts
+# are vulnerable). Never commit these to a shared/public repo.
+cve_scan_results.*
+audit.*
+*_report.html
+*.json
+*.csv
+
+# Keep the scripts and docs tracked; the broad *.json/*.csv rules above are
+# intentional for this repo (there are no source .json/.csv files to track).
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
