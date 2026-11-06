@@ -16,9 +16,6 @@ ADVISORY_URL = "https://ubuntu.com/security/CVE-2026-98432"
 # VERSION_ID; each maps a kernel-flavor substring (as in `uname -r`) to the first
 # FIXED dpkg version. VERIFY / UPDATE from Canonical; fixes were still rolling out
 # in early Nov 2026, so an unlisted release/flavor reports "review", not "ok".
-# Keyed by VERSION_ID -> {kernel-ABI-prefix (as it appears in `uname -r`): fixed version}.
-# The ABI prefix (e.g. "6.8.0-") distinguishes the stock kernel from an HWE kernel
-# on the same release, which have different fixed versions.
 UBUNTU_FIXED = {
     "22.04": {"5.15.0-": "5.15.0-203.213",         # stock generic/virtual
               "6.8.0-":  "6.8.0-149.149~22.04.1"},  # HWE 6.8
@@ -26,6 +23,14 @@ UBUNTU_FIXED = {
               "7.0.0-":  "7.0.0-43.43~24.04.1"},     # HWE 7.0
     "26.04": {"7.0.0-":  "7.0.0-43.43"},
     "26.10": {"7.3.0-":  "7.3.0-10.10"},
+}
+
+# Proxmox VE kernels (…-pve) are versioned on their own track, not by the distro
+# linux-image package, so match the kernel release itself. Keyed by base series
+# (before the first "-"). Per the Proxmox note: the Ubuntu 7.0.0-43 source fix
+# landed in 7.0.14-25-pve; 7.0.14-24-pve and earlier lack it.
+PVE_FIXED = {
+    "7.0.14": "7.0.14-25-pve",
 }
 
 # FreeBSD base system via `freebsd-version`. EMPTY because FreeBSD is NOT affected
@@ -38,6 +43,18 @@ FREEBSD_FIXED = {
 def _check_ubuntu(run, osinfo):
     rel = osinfo.get("version", "")
     _, krel, _ = run("uname -r")  # e.g. 5.15.0-125-generic
+
+    if krel.endswith("-pve"):     # Proxmox VE kernel
+        base = {"kernel": krel, "platform": "Proxmox VE", "advisory": ADVISORY_URL}
+        fixed = PVE_FIXED.get(krel.split("-")[0])
+        if fixed is None:
+            return {"status": "review",
+                    "details": [{**base, "note": "Proxmox kernel series not in "
+                                                 "PVE_FIXED — verify against Proxmox repos"}]}
+        vulnerable = version_less_than(run, osinfo["family"], krel, fixed)
+        return {"status": "vulnerable" if vulnerable else "ok",
+                "details": [{**base, "fixed_version": fixed}]}
+
     code, pkgver, _ = run(f"dpkg-query -W -f='${{Version}}' linux-image-{krel} 2>/dev/null")
     pkgver = pkgver if (code == 0 and pkgver) else None
 
@@ -156,6 +173,13 @@ sudo sysctl --system
 
 Restart services that already hold an MPTCP listener. The setting is per network
 namespace, so containers need it set in their own namespace.
+
+# Proxmox VE
+
+The Proxmox kernel carries the fix from **7.0.14-25-pve** onward (built on the
+Ubuntu 7.0.0-43 source); 7.0.14-24-pve and earlier do not. Update from the
+no-subscription or test repository and reboot - `uname -r` at 7.0.14-25-pve or
+newer is fixed.
 
 # Not affected
 
