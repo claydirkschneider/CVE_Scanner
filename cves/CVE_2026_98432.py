@@ -16,10 +16,16 @@ ADVISORY_URL = "https://ubuntu.com/security/CVE-2026-98432"
 # VERSION_ID; each maps a kernel-flavor substring (as in `uname -r`) to the first
 # FIXED dpkg version. VERIFY / UPDATE from Canonical; fixes were still rolling out
 # in early Nov 2026, so an unlisted release/flavor reports "review", not "ok".
+# Keyed by VERSION_ID -> {kernel-ABI-prefix (as it appears in `uname -r`): fixed version}.
+# The ABI prefix (e.g. "6.8.0-") distinguishes the stock kernel from an HWE kernel
+# on the same release, which have different fixed versions.
 UBUNTU_FIXED = {
-    # "24.04": {"generic": "6.8.0-00.00", "aws": "6.8.0-00.00", "azure": "6.8.0-00.00"},
-    # "22.04": {"generic": "5.15.0-000.000"},
-    # "20.04": {"generic": "5.4.0-000.000"},
+    "22.04": {"5.15.0-": "5.15.0-203.213",         # stock generic/virtual
+              "6.8.0-":  "6.8.0-149.149~22.04.1"},  # HWE 6.8
+    "24.04": {"6.8.0-":  "6.8.0-149.149",           # stock generic/virtual
+              "7.0.0-":  "7.0.0-43.43~24.04.1"},     # HWE 7.0
+    "26.04": {"7.0.0-":  "7.0.0-43.43"},
+    "26.10": {"7.3.0-":  "7.3.0-10.10"},
 }
 
 # FreeBSD base system via `freebsd-version`. EMPTY because FreeBSD is NOT affected
