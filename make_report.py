@@ -123,7 +123,7 @@ def summarize_details(cc: dict) -> str:
 
 
 def build(records: list[dict], cve: str, org: str, prepared_by: str,
-          fix_html: str = "") -> str:
+          fix_html: str = "", subnets: str = "") -> str:
     total = len(records)
     states = Counter(r.get("state", "unknown") for r in records)
     audited = [r for r in records if r.get("state") == "logged_in"]
@@ -199,6 +199,8 @@ def build(records: list[dict], cve: str, org: str, prepared_by: str,
         meta_bits.append(esc(org))
     if prepared_by:
         meta_bits.append("Prepared by " + esc(prepared_by))
+    if subnets:
+        meta_bits.append("Subnet scanned: " + esc(subnets))
     meta_bits.append("Generated " + esc(generated))
     meta_line = " &nbsp;·&nbsp; ".join(meta_bits)
 
@@ -336,7 +338,7 @@ def build(records: list[dict], cve: str, org: str, prepared_by: str,
   </table>
 
   <footer>
-    Scope: {total} IP(s) scanned
+    Scope: {total} IP(s) scanned{(' in ' + esc(subnets)) if subnets else ''}
     ({', '.join(f'{esc(k)}: {v}' for k, v in sorted(states.items()))}).
     Only hosts that could be logged into are assessed for the CVE.
     “review” is not a clean result — it marks hosts that must be confirmed
@@ -353,6 +355,8 @@ def main() -> None:
     ap.add_argument("--cve", help="Override the CVE title (else taken from the data)")
     ap.add_argument("--org", default="", help="Organization name for the header")
     ap.add_argument("--prepared-by", default="", help="Name for the header byline")
+    ap.add_argument("--subnet", help="Subnet(s) scanned, shown in the header "
+                    "(default: read from <input>.meta.json if present)")
     ap.add_argument("--fix-file", help="Markdown file with the known fix / remediation "
                     "(defaults to remediation.md next to the data, if present)")
     ap.add_argument("--fix", help="Inline remediation text (overrides --fix-file)")
@@ -394,8 +398,17 @@ def main() -> None:
                 print(f"[!] Could not read fix file {fix_path}: {e}", file=sys.stderr)
     fix_html = render_md(fix_md) if fix_md.strip() else ""
 
+    subnets = args.subnet or ""
+    if not subnets:
+        meta_file = args.json.rsplit(".", 1)[0] + ".meta.json"
+        try:
+            with open(meta_file) as f:
+                subnets = ", ".join(json.load(f).get("subnets", []))
+        except (OSError, json.JSONDecodeError):
+            pass
+
     out = args.output or (args.json.rsplit(".", 1)[0] + "_report.html")
-    html_doc = build(records, cve, args.org, args.prepared_by, fix_html)
+    html_doc = build(records, cve, args.org, args.prepared_by, fix_html, subnets)
     with open(out, "w") as f:
         f.write(html_doc)
 

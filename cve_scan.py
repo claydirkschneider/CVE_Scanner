@@ -186,7 +186,10 @@ def main() -> None:
 
     password = os.environ.get(args.password_env)
     if not password:
-        password = getpass.getpass(f"SSH password for {args.username}: ")
+        try:
+            password = getpass.getpass(f"SSH password for {args.username}: ")
+        except (KeyboardInterrupt, EOFError):
+            sys.exit("\n[!] Cancelled at password prompt.")
 
     targets = expand_targets(args.subnet)
     print(f"[*] {len(targets)} target(s). Checking port {args.port}, then auditing "
@@ -248,6 +251,16 @@ def main() -> None:
                         json.dumps(mit.get("details", [])) if mit else ""]
             wr.writerow(row)
 
+    # Scan metadata sidecar (subnet(s) scanned) for the report.
+    meta_path = f"{out_stem}.meta.json"
+    with open(meta_path, "w") as f:
+        json.dump({"cve": cve_id,
+                   "subnets": [x.strip() for arg in args.subnet
+                               for x in arg.split(",") if x.strip()],
+                   "port": args.port,
+                   "scanned_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
+                  f, indent=2)
+
     # Remediation sidecar for the report (comes from the CVE definition).
     rem_path = None
     remediation = getattr(cve_mod, "REMEDIATION", "")
@@ -273,4 +286,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit("\n[!] Interrupted.")
