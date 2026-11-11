@@ -23,6 +23,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import sys
 from datetime import datetime, timezone
@@ -166,8 +167,9 @@ def main() -> None:
                     help="Per-connection/port timeout, seconds (default 8).")
     ap.add_argument("--output", "-o", default=None,
                     help="Output prefix. The CVE ID is always appended, so "
-                         "'-o audit' -> audit_CVE-XXXX.{json,csv}. Default: the "
-                         "CVE ID alone, e.g. CVE-2026-109518.json.")
+                         "'-o audit' -> audit_CVE-XXXX.{json,csv}. Default: "
+                         "<CVE>_<subnet>_<date-time>, e.g. "
+                         "CVE-2026-109518_66.196.48.0-25_20261111-125900.")
     ap.add_argument("--mitigation-check", action="store_true",
                     help="Also run the definition's mitigation_check() per host "
                          "(exposure/workaround posture, independent of patch status).")
@@ -178,7 +180,16 @@ def main() -> None:
     except (FileNotFoundError, AttributeError) as e:
         sys.exit(f"[!] {e}")
     cve_id = cve_mod.CVE_ID
-    out_stem = f"{args.output}_{cve_id}" if args.output else cve_id
+    subnet_list = [x.strip() for arg in args.subnet
+                   for x in arg.split(",") if x.strip()]
+    if args.output:
+        out_stem = f"{args.output}_{cve_id}"
+    else:
+        # Auto name: <CVE>_<subnet>_<YYYYMMDD-HHMMSS>, so every run is a new version.
+        tag = re.sub(r"[^A-Za-z0-9.]+", "-", subnet_list[0]).strip("-")
+        if len(subnet_list) > 1:
+            tag += f"+{len(subnet_list) - 1}more"
+        out_stem = f"{cve_id}_{tag}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
     if args.mitigation_check and not hasattr(cve_mod, "mitigation_check"):
         print(f"[!] {cve_id} has no mitigation_check(); --mitigation-check ignored.",
@@ -255,8 +266,7 @@ def main() -> None:
     meta_path = f"{out_stem}.meta.json"
     with open(meta_path, "w") as f:
         json.dump({"cve": cve_id,
-                   "subnets": [x.strip() for arg in args.subnet
-                               for x in arg.split(",") if x.strip()],
+                   "subnets": subnet_list,
                    "port": args.port,
                    "scanned_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
                   f, indent=2)

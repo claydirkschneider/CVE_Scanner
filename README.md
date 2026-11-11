@@ -47,8 +47,8 @@ python3 cve_scan.py --cve CVE-2026-109518 --subnet 10.0.0.0/24 --username admin 
 That writes `audit_CVE-2026-109518.json`, `.csv`, and `.remediation.md` in the
 current directory — the CVE is always part of the filename, so scans for
 different CVEs never collide. `--cve CVE-2026-109518` loads
-`cves/CVE_2026_109518.py`. With no `--output`, files are named for the CVE alone
-(`CVE-2026-109518.json`).
+`cves/CVE_2026_109518.py`. With no `--output`, files are named automatically from the CVE, subnet and
+run time (`CVE-2026-109518_10.0.0.0-24_20261111-125900.json`), so every run is its own version.
 
 ### Common options
 
@@ -62,7 +62,7 @@ different CVEs never collide. `--cve CVE-2026-109518` loads
 | `--port`, `-p` | `22` | Port to test and connect on |
 | `--workers`, `-w` | `20` | Concurrent hosts |
 | `--timeout`, `-t` | `8` | Per-connection / port-check timeout (seconds) |
-| `--output`, `-o` | *(CVE ID)* | Output prefix; the CVE ID is always appended (`-o audit` → `audit_CVE-XXXX.json`). Default is the CVE ID alone |
+| `--output`, `-o` | *(CVE ID)* | Output prefix; the CVE ID is always appended (`-o audit` → `audit_CVE-XXXX.json`). Default is `<CVE>_<subnet>_<YYYYMMDD-HHMMSS>` |
 | `--mitigation-check` | *(off)* | Also run the definition's `mitigation_check()` per host (workaround/exposure posture, independent of patch status) |
 
 ## 3. What you get back
