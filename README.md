@@ -316,7 +316,7 @@ Save it as `cves/CVE_YYYY_NNNNN.py`. That's the whole deliverable.
 
 ```bash
 cat > creds.json <<'EOF'
-[{"username": "clay", "password": "..."}, {"username": "admin", "password": "..."}]
+[{"username": "operator", "password": "..."}, {"username": "admin", "password": "..."}]
 EOF
 chmod 600 creds.json
 python3 cve_scan.py --cve CVE-2026-109518 --subnet 10.0.0.0/24 --creds-file creds.json

@@ -1,5 +1,5 @@
 [
   {"username": "admin", "password": "CHANGE-ME-first-account"},
   {"username": "root", "password": "CHANGE-ME-second-account"},
-  {"username": "clay", "password": "CHANGE-ME-third-account"}
+  {"username": "operator", "password": "CHANGE-ME-third-account"}
 ]
