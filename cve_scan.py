@@ -51,10 +51,104 @@ def ssh_exec(client, cmd: str, timeout: int = 15):
     return code, out, err
 
 
+# --- device fingerprinting -------------------------------------------------
+# Network gear (Arista EOS, Cisco, Junos, FortiOS) usually drops SSH logins into a
+# vendor CLI where `uname` fails, so we probe vendor commands when the host does
+# not answer like a Unix box.
+
+def _role_from_model(vendor: str, model: str) -> str:
+    m = (model or "").lower()
+    if vendor == "Arista":
+        return "router" if m.startswith(("dcs-7500", "dcs-7800")) else "switch"
+    if vendor == "Fortinet":
+        return "firewall"
+    if vendor == "Juniper":
+        if m.startswith(("srx", "vsrx")):
+            return "firewall"
+        if m.startswith(("mx", "ptx", "acx")):
+            return "router"
+        if m.startswith(("ex", "qfx")):
+            return "switch"
+    if vendor == "Cisco":
+        if "asa" in m or "firepower" in m or "ftd" in m:
+            return "firewall"
+        if m.startswith(("n", "ws-", "c9", "c3", "c2")) or "nexus" in m or "catalyst" in m:
+            return "switch"
+        if m.startswith(("isr", "asr", "csr", "c8")):
+            return "router"
+    return "unknown"
+
+
+def _network_info(vendor, os_name, version, model) -> dict:
+    return {"family": "network", "os": os_name, "version": version,
+            "vendor": vendor, "model": model,
+            "role": _role_from_model(vendor, model)}
+
+
+def detect_network_device(run) -> dict | None:
+    """Return osinfo for a recognised network appliance, else None."""
+    _, out, _ = run("show version")
+    if re.search(r"\bArista\b", out):
+        model = (re.search(r"Arista\s+(\S+)", out) or [None, ""])[1]
+        ver = (re.search(r"Software image version:\s*(\S+)", out) or [None, ""])[1]
+        return _network_info("Arista", "Arista EOS", ver, model)
+    if "Cisco" in out:
+        ver = (re.search(r"(?:Version|system:\s+version)\s+([\w.()\-]+)", out) or [None, ""])[1]
+        if "NX-OS" in out or "Nexus" in out:
+            m = re.search(r"cisco\s+(Nexus\S*\s*\S*)", out, re.I)
+            return _network_info("Cisco", "Cisco NX-OS", ver, m.group(1) if m else "Nexus")
+        if "Adaptive Security Appliance" in out:
+            return _network_info("Cisco", "Cisco ASA", ver, "ASA")
+        m = re.search(r"[Cc]isco\s+(\S+)\s+\(.*?\)\s+processor", out)
+        return _network_info("Cisco", "Cisco IOS", ver, m.group(1) if m else "")
+    if re.search(r"Junos:", out):
+        ver = (re.search(r"Junos:\s*(\S+)", out) or [None, ""])[1]
+        model = (re.search(r"Model:\s*(\S+)", out) or [None, ""])[1]
+        return _network_info("Juniper", "Junos", ver, model)
+    _, out, _ = run("get system status")
+    if "Forti" in out:
+        m = re.search(r"Version:\s*(Forti\S+)\s+v?([\w.]+)", out)
+        return _network_info("Fortinet", "FortiOS", m.group(2) if m else "",
+                             m.group(1) if m else "FortiGate")
+    return None
+
+
+def detect_freebsd_firewall(run, base_ver: str) -> dict | None:
+    """FreeBSD-based firewall distros: pfSense (CE/Plus) and OPNsense."""
+    _, plat, _ = run("cat /etc/platform 2>/dev/null")
+    if "pfsense" in plat.lower():
+        _, ver, _ = run("cat /etc/version 2>/dev/null")
+        ver = ver.strip()
+        _, model, _ = run("kenv smbios.system.product 2>/dev/null")
+        plus = bool(re.match(r"\d{2}\.\d{2}", ver))   # Plus: 24.03; CE: 2.7.2
+        info = _network_info("Netgate", "pfSense Plus" if plus else "pfSense CE",
+                             ver, model.strip())
+        info["role"] = "firewall"
+        info["base_os"] = f"FreeBSD {base_ver}"
+        return info
+    _, ons, _ = run("opnsense-version 2>/dev/null")
+    if ons.strip().lower().startswith("opnsense"):
+        m = re.match(r"OPNsense\s+(\S+)", ons.strip(), re.I)
+        info = _network_info("OPNsense", "OPNsense", m.group(1) if m else "", "")
+        info["role"] = "firewall"
+        info["base_os"] = f"FreeBSD {base_ver}"
+        return info
+    return None
+
+
 def detect_os(run) -> dict:
-    _, kernel, _ = run("uname -s")
+    code, kernel, _ = run("uname -s")
+    if code != 0 or not re.fullmatch(r"[A-Za-z]+", kernel or ""):
+        net = detect_network_device(run)
+        if net:
+            return net
+        return {"family": "unknown", "os": "Unknown (no uname; unrecognised CLI)",
+                "version": ""}
     if kernel == "FreeBSD":
         _, ver, _ = run("freebsd-version 2>/dev/null || uname -r")
+        fw = detect_freebsd_firewall(run, ver)
+        if fw:
+            return fw
         return {"family": "freebsd", "os": "FreeBSD", "version": ver}
 
     _, osr, _ = run("cat /etc/os-release 2>/dev/null")
@@ -64,10 +158,58 @@ def detect_os(run) -> dict:
             k, _, v = line.partition("=")
             fields[k] = v.strip().strip('"')
     distro_id = fields.get("ID", "").lower()
+    if distro_id not in ("ubuntu", "debian"):
+        # Arista EOS (bash shell) is Linux underneath; identify it by its release file.
+        _, eos, _ = run("cat /etc/Eos-release 2>/dev/null")
+        if eos.strip():
+            m = re.search(r"(\d+\.\d+\.\d+\S*)", eos)
+            _, hw, _ = run("FastCli -c 'show version' 2>/dev/null | head -3")
+            model = (re.search(r"Arista\s+(\S+)", hw) or [None, ""])[1]
+            return _network_info("Arista", "Arista EOS", m.group(1) if m else "", model)
     pretty = fields.get("PRETTY_NAME") or fields.get("NAME", "Linux")
     version = fields.get("VERSION_ID", "")
     family = "ubuntu" if distro_id in ("ubuntu", "debian") else distro_id or "linux"
     return {"family": family, "os": pretty, "version": version}
+
+
+def probe_auth_methods(host: str, port: int, username: str, timeout: float):
+    """Ask sshd which auth methods it offers `username` (the SSH 'none' probe).
+    Needs no password. Returns a list such as ['publickey','password'], ['none']
+    if no auth is required, or None if the probe failed."""
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except OSError:
+        return None
+    t = paramiko.Transport(sock)
+    try:
+        t.banner_timeout = timeout
+        t.start_client(timeout=timeout)
+        try:
+            t.auth_none(username)
+            return ["none"]
+        except paramiko.BadAuthenticationType as e:
+            return list(e.allowed_types)
+        except paramiko.AuthenticationException:
+            return None
+    except Exception:  # noqa: BLE001 - any handshake problem == unknown
+        return None
+    finally:
+        try:
+            t.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def auth_policy(methods) -> str:
+    if methods is None:
+        return "unknown"
+    if "none" in methods:
+        return "no_auth_required"
+    if "password" in methods or "keyboard-interactive" in methods:
+        return "password_allowed"
+    if "publickey" in methods:
+        return "key_only"
+    return "unknown"
 
 
 def port_open(host: str, port: int, timeout: float) -> bool:
@@ -79,7 +221,8 @@ def port_open(host: str, port: int, timeout: float) -> bool:
         return False
 
 
-def scan_host(host, port, creds, timeout, cve_mod, mitigation=False) -> dict:
+def scan_host(host, port, creds, timeout, cve_mod, mitigation=False,
+              device_map=None) -> dict:
     """Always returns a record. 'state' says what happened to this IP."""
     result = {"host": host, "scanned_at": datetime.now(timezone.utc).isoformat(),
               "state": None}
@@ -89,7 +232,12 @@ def scan_host(host, port, creds, timeout, cve_mod, mitigation=False) -> dict:
         return result
 
     client = None
+    auth_methods: dict = {}
     for username, password in creds:
+        if username not in auth_methods:
+            auth_methods[username] = probe_auth_methods(host, port, username, timeout)
+        if auth_policy(auth_methods[username]) == "key_only":
+            continue  # password login is impossible; don't burn an attempt
         c = paramiko.SSHClient()
         c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
@@ -109,8 +257,13 @@ def scan_host(host, port, creds, timeout, cve_mod, mitigation=False) -> dict:
             result["state"] = "ssh_error"
             result["error"] = str(e)
             return result
+    who = result.get("username") or creds[0][0]
+    result["ssh_auth_methods"] = auth_methods.get(who)
+    result["ssh_auth_policy"] = auth_policy(auth_methods.get(who))
     if client is None:
-        result["state"] = "auth_failed"
+        all_key_only = bool(auth_methods) and all(
+            auth_policy(m) == "key_only" for m in auth_methods.values())
+        result["state"] = "key_only" if all_key_only else "auth_failed"
         return result
 
     def run(cmd, timeout_=15):
@@ -118,17 +271,26 @@ def scan_host(host, port, creds, timeout, cve_mod, mitigation=False) -> dict:
 
     try:
         osinfo = detect_os(run)
+        if device_map and host in device_map:      # manual role override
+            osinfo["role"] = device_map[host]
         result.update(osinfo)
         result["cve"] = cve_mod.CVE_ID
-        try:
-            result["cve_check"] = cve_mod.cve_check(run, osinfo)
-        except Exception as e:  # a bad definition shouldn't kill the host record
-            result["cve_check"] = {"status": "error", "details": [str(e)]}
-        if mitigation and hasattr(cve_mod, "mitigation_check"):
+        skip = cvelib.not_applicable_reason(cve_mod, osinfo)
+        if skip:
+            na = {"status": "not_applicable", "details": [{"note": skip}]}
+            result["cve_check"] = na
+            if mitigation:
+                result["mitigation"] = dict(na)
+        else:
             try:
-                result["mitigation"] = cve_mod.mitigation_check(run, osinfo)
-            except Exception as e:
-                result["mitigation"] = {"status": "error", "details": [str(e)]}
+                result["cve_check"] = cve_mod.cve_check(run, osinfo)
+            except Exception as e:  # a bad definition shouldn't kill the host record
+                result["cve_check"] = {"status": "error", "details": [str(e)]}
+            if mitigation and hasattr(cve_mod, "mitigation_check"):
+                try:
+                    result["mitigation"] = cve_mod.mitigation_check(run, osinfo)
+                except Exception as e:
+                    result["mitigation"] = {"status": "error", "details": [str(e)]}
         result["state"] = "logged_in"
         return result
     except Exception as e:  # noqa: BLE001
@@ -211,6 +373,9 @@ def main() -> None:
                          "'-o audit' -> audit_CVE-XXXX.{json,csv}. Default: "
                          "<CVE>_<subnet>_<date-time>, e.g. "
                          "CVE-2026-109518_66.196.48.0-25_20261111-125900.")
+    ap.add_argument("--device-map",
+                    help="JSON file {\"10.0.0.1\": \"router\", ...} to override the "
+                         "inferred role (router/switch/firewall) of network devices.")
     ap.add_argument("--mitigation-check", action="store_true",
                     help="Also run the definition's mitigation_check() per host "
                          "(exposure/workaround posture, independent of patch status).")
@@ -251,6 +416,15 @@ def main() -> None:
         creds = [(args.username, password)]
         who = args.username
 
+    device_map = None
+    if args.device_map:
+        try:
+            with open(args.device_map) as f:
+                device_map = json.load(f)
+            assert isinstance(device_map, dict)
+        except (OSError, ValueError, AssertionError) as e:
+            sys.exit(f"[!] Bad --device-map {args.device_map}: {e}")
+
     targets = expand_targets(args.subnet)
     print(f"[*] {len(targets)} target(s). Checking port {args.port}, then auditing "
           f"for {cve_id} as {who} ({args.workers} workers)...",
@@ -260,7 +434,8 @@ def main() -> None:
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {
             ex.submit(scan_host, h, args.port, creds,
-                      args.timeout, cve_mod, args.mitigation_check): h
+                      args.timeout, cve_mod, args.mitigation_check,
+                      device_map): h
             for h in targets
         }
         for fut in concurrent.futures.as_completed(futures):
@@ -274,7 +449,7 @@ def main() -> None:
                     extra = f" MIT:{res['mitigation'].get('status', '?')}"
                 print(f"[+] {res['host']:<16} {state:<12} {res.get('username',''):<10} {res.get('os','?'):<26} "
                       f"{res.get('version',''):<14} CVE:{status}{extra}", file=sys.stderr)
-            elif state in ("ssh_error", "info_error", "auth_failed"):
+            elif state in ("ssh_error", "info_error", "auth_failed", "key_only"):
                 print(f"[-] {res['host']:<16} {state}", file=sys.stderr)
             # port_closed: silent on screen
 
@@ -294,6 +469,7 @@ def main() -> None:
     with open(csv_path, "w", newline="") as f:
         wr = csv.writer(f)
         header = ["host", "state", "username", "os", "version", "family",
+                  "vendor", "model", "role", "ssh_auth_policy",
                   "cve", "cve_status", "details"]
         if args.mitigation_check:
             header += ["mitigation_status", "mitigation_details"]
@@ -302,7 +478,8 @@ def main() -> None:
             cc = r.get("cve_check", {})
             row = [
                 r["host"], r.get("state", ""), r.get("username", ""), r.get("os", ""), r.get("version", ""),
-                r.get("family", ""), r.get("cve", "") if r.get("state") == "logged_in" else "",
+                r.get("family", ""), r.get("vendor", ""), r.get("model", ""),
+                r.get("role", ""), r.get("ssh_auth_policy", ""), r.get("cve", "") if r.get("state") == "logged_in" else "",
                 cc.get("status", ""), json.dumps(cc.get("details", [])) if cc else "",
             ]
             if args.mitigation_check:

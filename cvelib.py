@@ -13,6 +13,12 @@ provide:
 and may provide:
     mitigation_check(run, osinfo) -> {"status": str, "details": list}
     REMEDIATION   str (markdown) — the known fix, shown in the report
+    APPLIES_TO    set of osinfo families the CVE can affect, e.g. {"ubuntu",
+                  "debian","linux","freebsd"}. If present, the scanner marks any
+                  other host not_applicable WITHOUT calling cve_check. Network
+                  appliances (switches/routers/firewalls) have family "network",
+                  so they are skipped unless "network" is listed. If absent, only
+                  network appliances are skipped.
 
 Contract for the two callables:
     run(cmd, timeout=15) -> (exit_code, stdout, stderr)   # runs on the host
@@ -51,6 +57,24 @@ def version_less_than(run, family: str, installed: str, fixed: str) -> bool:
         _, out, _ = run(f"pkg version -t '{installed}' '{fixed}'")
         return out.strip() == "<"
     return False
+
+
+def not_applicable_reason(cve_mod, osinfo: dict) -> str | None:
+    """Return a human reason if this CVE should be skipped for this host, else None."""
+    family = osinfo.get("family", "")
+    allowed = getattr(cve_mod, "APPLIES_TO", None)
+    if family == "network":
+        if allowed and "network" in allowed:
+            return None
+        who = " ".join(x for x in (osinfo.get("vendor"), osinfo.get("model")) if x)
+        base = f"; built on {osinfo['base_os']}" if osinfo.get("base_os") else ""
+        return (f"network appliance ({who or osinfo.get('os', 'unknown')}, "
+                f"role: {osinfo.get('role', 'unknown')}{base}) - host-OS CVE check "
+                f"not applicable; confirm against the vendor advisory"
+                f"{' (appliance base-OS fixes ship in vendor releases)' if base else ''}")
+    if allowed is not None and family not in allowed:
+        return f"{osinfo.get('os', family)} is outside this CVE's scope"
+    return None
 
 
 def cve_module_path(cve_id: str, cve_dir: str) -> str:

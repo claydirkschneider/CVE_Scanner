@@ -122,6 +122,15 @@ def summarize_details(cc: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in d.items())
 
 
+def dev_note(r: dict) -> str:
+    """Small 'role · vendor model' caption under the OS for network appliances."""
+    if r.get("family") != "network":
+        return ""
+    bits = [r.get("role") or "network device",
+            " ".join(x for x in (r.get("vendor"), r.get("model")) if x)]
+    return ('<div class="note">' + esc(" · ".join(b for b in bits if b)) + "</div>")
+
+
 def build(records: list[dict], cve: str, org: str, prepared_by: str,
           fix_html: str = "", subnets: str = "") -> str:
     total = len(records)
@@ -180,7 +189,7 @@ def build(records: list[dict], cve: str, org: str, prepared_by: str,
         rows.append(f"""
           <tr>
             <td class="mono">{esc(r.get('host'))}</td>
-            <td>{esc(r.get('os'))}</td>
+            <td>{esc(r.get('os'))}{dev_note(r)}</td>
             <td class="mono">{esc(r.get('version'))}</td>
             <td><span class="pill {badge}">{esc(st)}</span></td>
             <td class="note">{esc(summarize_details(cc))}</td>
@@ -192,6 +201,24 @@ def build(records: list[dict], cve: str, org: str, prepared_by: str,
         f"<tr><td>{esc(os)}</td><td class='mono'>{n}</td></tr>"
         for os, n in sorted(os_counts.items(), key=lambda kv: (-kv[1], kv[0]))
     ) or '<tr><td colspan="2" class="note">—</td></tr>'
+
+    ko = sorted((r for r in records if r.get("state") == "key_only"),
+                key=lambda r: [int(x) if x.isdigit() else 0
+                               for x in str(r.get("host", "")).split(".")])
+    if ko:
+        ko_rows = "".join(
+            f"<tr><td class='mono'>{esc(r.get('host'))}</td>"
+            f"<td class='note'>offers: {esc(', '.join(r.get('ssh_auth_methods') or []))}"
+            f"</td></tr>" for r in ko)
+        key_only_html = (
+            "<h3>Key-only SSH hosts (not audited)</h3>"
+            "<p class='note'>These hosts accept public-key login only, so a "
+            "password scan cannot assess them. Re-scan with key support or "
+            "check them manually.</p>"
+            "<table><thead><tr><th>Host</th><th>SSH methods offered</th></tr></thead>"
+            f"<tbody>{ko_rows}</tbody></table>")
+    else:
+        key_only_html = ""
 
     generated = datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip()
     meta_bits = []
@@ -336,6 +363,8 @@ def build(records: list[dict], cve: str, org: str, prepared_by: str,
       <th>Evidence</th></tr></thead>
     <tbody>{host_rows}</tbody>
   </table>
+
+  {key_only_html}
 
   <footer>
     Scope: {total} IP(s) scanned{(' in ' + esc(subnets)) if subnets else ''}

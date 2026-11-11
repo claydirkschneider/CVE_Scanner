@@ -326,3 +326,37 @@ Pairs are tried in order per host; the first that logs in wins and its username 
 recorded (`username` in JSON/CSV, never the password). The scanner refuses a creds
 file readable by others. `creds*` is gitignored. Keep `--max-attempts` low to avoid
 locking accounts or tripping fail2ban/LFD on your own servers.
+
+## Network devices (switches / routers / firewalls)
+
+Hosts that don't answer like Unix (`uname` fails) are probed with vendor commands
+(`show version`, `get system status`) and recognised as **Arista EOS, Cisco
+(IOS/NX-OS/ASA), Juniper Junos, or Fortinet FortiOS**; Arista EOS in bash mode is
+caught via `/etc/Eos-release`. Each gets `family: network` plus `vendor`, `model`
+and an inferred `role` (switch / router / firewall / unknown), shown in the JSON,
+CSV and report.
+
+Host-OS CVE checks are **not run** on network devices: they're reported
+`not_applicable` with a note to confirm against the vendor advisory (EOS and similar
+run Linux, so a kernel CVE can still matter — it's fixed by a vendor firmware
+release, not `apt`). A CVE file can opt in by setting `APPLIES_TO = {"network", ...}`
+(or restrict to specific families the same way). Roles are inferred from the model;
+override with `--device-map map.json` (`{"10.0.0.1": "router"}`).
+
+## pfSense / OPNsense
+
+A FreeBSD box is checked for `/etc/platform` (pfSense CE/Plus) and `opnsense-version`.
+If it's a firewall distro it's reported as `family: network`, `role: firewall`
+(vendor Netgate/OPNsense, with the pfSense version and the underlying `base_os`), and
+host-OS CVE checks are skipped as `not_applicable` — pfSense/OPNsense ship their own
+FreeBSD builds, so compare against the vendor's release, not stock FreeBSD versions.
+
+## Key-only SSH hosts
+
+Before logging in, the scanner asks sshd which auth methods it offers each username
+(an SSH `none` probe — no password needed). Result per host: `ssh_auth_methods` and
+`ssh_auth_policy` (`key_only` / `password_allowed` / `no_auth_required` / `unknown`,
+also a CSV column). Key-only hosts get state `key_only`, are **not** sent password
+attempts (so no lockout risk), and are listed in their own report section.
+`keyboard-interactive` counts as password-capable. Methods can differ per user
+(`Match User`), so each username in the creds file is probed.
