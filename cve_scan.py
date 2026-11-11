@@ -231,9 +231,15 @@ def try_login(host, port, username, password, timeout):
             )
             return "ok", c
         except paramiko.BadAuthenticationType as e:
-            # Server doesn't offer password auth at all; it tells us what it does.
+            # paramiko raises this when password auth isn't offered, OR when it
+            # fell back to keyboard-interactive and that failed (wrong password
+            # on a PAM/RADIUS host). Only treat it as key-only when neither
+            # password nor keyboard-interactive is on offer.
             c.close()
-            return "key_only", list(e.allowed_types)
+            methods = list(e.allowed_types)
+            if auth_policy(methods) == "key_only":
+                return "key_only", methods
+            return "denied", None
         except paramiko.AuthenticationException:
             c.close()
             return "denied", None
