@@ -83,6 +83,9 @@ def _role_from_model(vendor: str, model: str) -> str:
         if m.startswith(("ex", "qfx")):
             return "switch"
     if vendor == "Cisco":
+        m = re.sub(r"^cisco", "", m)           # CISCO2911/K9 -> 2911/k9
+        if re.match(r"(19[0-4]\d|29[0-5]\d|39[0-4]\d|4[34]\d\d)(/|$)", m):
+            return "router"                    # ISR 1900/2900/3900/4300/4400
         if "asa" in m or "firepower" in m or "ftd" in m:
             return "firewall"
         if m.startswith(("n", "ws-", "c9", "c3", "c2")) or "nexus" in m or "catalyst" in m:
@@ -112,7 +115,7 @@ def detect_network_device(run) -> dict | None:
             return _network_info("Cisco", "Cisco NX-OS", ver, m.group(1) if m else "Nexus")
         if "Adaptive Security Appliance" in out:
             return _network_info("Cisco", "Cisco ASA", ver, "ASA")
-        m = re.search(r"[Cc]isco\s+(\S+)\s+\(.*?\)\s+processor", out)
+        m = re.search(r"[Cc]isco\s+(\S+)\s+\([^)]*\)\s+(?:processor|with)", out)
         return _network_info("Cisco", "Cisco IOS", ver, m.group(1) if m else "")
     if re.search(r"Junos:", out):
         ver = (re.search(r"Junos:\s*(\S+)", out) or [None, ""])[1]
@@ -166,11 +169,11 @@ def detect_freebsd_firewall(run, base_ver: str) -> dict | None:
 
 
 def detect_os(run) -> dict:
+    net = detect_network_device(run)   # first: IOS hangs on unknown commands
+    if net:
+        return net
     code, kernel, _ = run("uname -s")
     if code != 0 or not re.fullmatch(r"[A-Za-z]+", kernel or ""):
-        net = detect_network_device(run)
-        if net:
-            return net
         return {"family": "unknown", "os": "Unknown (no uname; unrecognised CLI)",
                 "version": ""}
     if kernel == "FreeBSD":
