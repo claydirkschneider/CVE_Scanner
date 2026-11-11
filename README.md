@@ -57,7 +57,9 @@ run time (`CVE-2026-109518_10.0.0.0-24_20261111-125900.json`), so every run is i
 | `--cve` | *(required)* | CVE ID to check, e.g. `CVE-2026-109518`. Loads `cves/CVE_2026_109518.py` |
 | `--cve-dir` | `cves/` next to the script | Directory of CVE definition files |
 | `--subnet` | *(required)* | CIDR, single IP, or comma list. Repeatable. e.g. `--subnet 10.0.0.0/24 --subnet 10.1.0.5` |
-| `--username`, `-u` | *(required)* | SSH username (same for all hosts) |
+| `--username`, `-u` | *(required unless `--creds-file`)* | SSH username (same for all hosts) |
+| `--creds-file` | | JSON list of `{"username","password"}` pairs tried in order per host until one logs in (file must be `chmod 600`; replaces `--username`) |
+| `--max-attempts` | `3` | Max credential pairs tried per host (avoids lockouts / fail2ban / CSF LFD) |
 | `--password-env` | `SSH_PASSWORD` | Name of the env var holding the password |
 | `--port`, `-p` | `22` | Port to test and connect on |
 | `--workers`, `-w` | `20` | Concurrent hosts |
@@ -309,3 +311,18 @@ Save it as `cves/CVE_YYYY_NNNNN.py`. That's the whole deliverable.
   README are tracked. `audit.json` / `audit.csv` / `*_report.html` /
   `*.remediation.md` contain or derive from real host inventory and are gitignored.
   The scripts and definitions themselves hold no hosts, credentials, or secrets.
+
+## Multiple credentials
+
+```bash
+cat > creds.json <<'EOF'
+[{"username": "clay", "password": "..."}, {"username": "admin", "password": "..."}]
+EOF
+chmod 600 creds.json
+python3 cve_scan.py --cve CVE-2026-109518 --subnet 10.0.0.0/24 --creds-file creds.json
+```
+
+Pairs are tried in order per host; the first that logs in wins and its username is
+recorded (`username` in JSON/CSV, never the password). The scanner refuses a creds
+file readable by others. `creds*` is gitignored. Keep `--max-attempts` low to avoid
+locking accounts or tripping fail2ban/LFD on your own servers.

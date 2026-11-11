@@ -79,7 +79,7 @@ def port_open(host: str, port: int, timeout: float) -> bool:
         return False
 
 
-def scan_host(host, port, username, password, timeout, cve_mod, mitigation=False) -> dict:
+def scan_host(host, port, creds, timeout, cve_mod, mitigation=False) -> dict:
     """Always returns a record. 'state' says what happened to this IP."""
     result = {"host": host, "scanned_at": datetime.now(timezone.utc).isoformat(),
               "state": None}
@@ -88,20 +88,29 @@ def scan_host(host, port, username, password, timeout, cve_mod, mitigation=False
         result["state"] = "port_closed"
         return result
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(
-            hostname=host, port=port, username=username, password=password,
-            timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
-            allow_agent=False, look_for_keys=False,
-        )
-    except paramiko.AuthenticationException:
+    client = None
+    for username, password in creds:
+        c = paramiko.SSHClient()
+        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            c.connect(
+                hostname=host, port=port, username=username, password=password,
+                timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
+                allow_agent=False, look_for_keys=False,
+            )
+            client = c
+            result["username"] = username  # which account worked (never the password)
+            break
+        except paramiko.AuthenticationException:
+            c.close()
+            continue
+        except (socket.timeout, socket.error, paramiko.SSHException, OSError) as e:
+            c.close()
+            result["state"] = "ssh_error"
+            result["error"] = str(e)
+            return result
+    if client is None:
         result["state"] = "auth_failed"
-        return result
-    except (socket.timeout, socket.error, paramiko.SSHException, OSError) as e:
-        result["state"] = "ssh_error"
-        result["error"] = str(e)
         return result
 
     def run(cmd, timeout_=15):
@@ -128,6 +137,30 @@ def scan_host(host, port, username, password, timeout, cve_mod, mitigation=False
         return result
     finally:
         client.close()
+
+
+def load_creds_file(path: str, max_attempts: int) -> list[tuple[str, str]]:
+    """Read [{"username":..., "password":...}, ...]. Refuses a file that other
+    users can read or that someone else owns."""
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        sys.exit(f"[!] Cannot read creds file {path}: {e}")
+    if st.st_mode & 0o077:
+        sys.exit(f"[!] {path} is accessible by other users "
+                 f"(mode {oct(st.st_mode & 0o777)}). Run: chmod 600 {path}")
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        sys.exit(f"[!] {path} is not owned by you; refusing to use it.")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        creds = [(c["username"], c["password"]) for c in data]
+        assert creds and all(isinstance(u, str) and isinstance(p, str)
+                             and u and p for u, p in creds)
+    except (ValueError, KeyError, TypeError, AssertionError):
+        sys.exit('[!] Creds file must be a non-empty JSON list of '
+                 '{"username": "...", "password": "..."} objects.')
+    return creds[:max_attempts]
 
 
 def expand_targets(subnets: list[str]) -> list[str]:
@@ -157,7 +190,15 @@ def main() -> None:
                          "next to this script).")
     ap.add_argument("--subnet", required=True, action="append",
                     help="CIDR, single IP, or comma list. Repeatable. e.g. 10.0.0.0/24")
-    ap.add_argument("--username", "-u", required=True)
+    ap.add_argument("--username", "-u",
+                    help="SSH username (single-credential mode). Not needed with "
+                         "--creds-file.")
+    ap.add_argument("--creds-file",
+                    help="JSON list of {\"username\",\"password\"} pairs, tried in "
+                         "order per host until one logs in. Must be chmod 600.")
+    ap.add_argument("--max-attempts", type=int, default=3,
+                    help="Max credential pairs tried per host (default 3) - "
+                         "limits account lockouts / fail2ban / CSF LFD blocks.")
     ap.add_argument("--password-env", default="SSH_PASSWORD",
                     help="Env var holding the password (default: SSH_PASSWORD). "
                          "If unset, you'll be prompted.")
@@ -195,22 +236,30 @@ def main() -> None:
         print(f"[!] {cve_id} has no mitigation_check(); --mitigation-check ignored.",
               file=sys.stderr)
 
-    password = os.environ.get(args.password_env)
-    if not password:
-        try:
-            password = getpass.getpass(f"SSH password for {args.username}: ")
-        except (KeyboardInterrupt, EOFError):
-            sys.exit("\n[!] Cancelled at password prompt.")
+    if args.creds_file:
+        creds = load_creds_file(args.creds_file, max(1, args.max_attempts))
+        who = f"{len(creds)} credential pair(s) from {args.creds_file}"
+    else:
+        if not args.username:
+            sys.exit("[!] Provide --username or --creds-file.")
+        password = os.environ.get(args.password_env)
+        if not password:
+            try:
+                password = getpass.getpass(f"SSH password for {args.username}: ")
+            except (KeyboardInterrupt, EOFError):
+                sys.exit("\n[!] Cancelled at password prompt.")
+        creds = [(args.username, password)]
+        who = args.username
 
     targets = expand_targets(args.subnet)
     print(f"[*] {len(targets)} target(s). Checking port {args.port}, then auditing "
-          f"for {cve_id} as {args.username} ({args.workers} workers)...",
+          f"for {cve_id} as {who} ({args.workers} workers)...",
           file=sys.stderr)
 
     results: list[dict] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {
-            ex.submit(scan_host, h, args.port, args.username, password,
+            ex.submit(scan_host, h, args.port, creds,
                       args.timeout, cve_mod, args.mitigation_check): h
             for h in targets
         }
@@ -223,7 +272,7 @@ def main() -> None:
                 extra = ""
                 if args.mitigation_check and "mitigation" in res:
                     extra = f" MIT:{res['mitigation'].get('status', '?')}"
-                print(f"[+] {res['host']:<16} {state:<12} {res.get('os','?'):<26} "
+                print(f"[+] {res['host']:<16} {state:<12} {res.get('username',''):<10} {res.get('os','?'):<26} "
                       f"{res.get('version',''):<14} CVE:{status}{extra}", file=sys.stderr)
             elif state in ("ssh_error", "info_error", "auth_failed"):
                 print(f"[-] {res['host']:<16} {state}", file=sys.stderr)
@@ -244,7 +293,7 @@ def main() -> None:
     csv_path = f"{out_stem}.csv"
     with open(csv_path, "w", newline="") as f:
         wr = csv.writer(f)
-        header = ["host", "state", "os", "version", "family",
+        header = ["host", "state", "username", "os", "version", "family",
                   "cve", "cve_status", "details"]
         if args.mitigation_check:
             header += ["mitigation_status", "mitigation_details"]
@@ -252,7 +301,7 @@ def main() -> None:
         for r in results:
             cc = r.get("cve_check", {})
             row = [
-                r["host"], r.get("state", ""), r.get("os", ""), r.get("version", ""),
+                r["host"], r.get("state", ""), r.get("username", ""), r.get("os", ""), r.get("version", ""),
                 r.get("family", ""), r.get("cve", "") if r.get("state") == "logged_in" else "",
                 cc.get("status", ""), json.dumps(cc.get("details", [])) if cc else "",
             ]

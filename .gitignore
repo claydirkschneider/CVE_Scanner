@@ -18,3 +18,8 @@ __pycache__/
 .venv/
 venv/
 env/
+# SSH credential files for --creds-file - NEVER commit.
+creds*
+*creds*.json
+*.creds
+!creds.example.json
