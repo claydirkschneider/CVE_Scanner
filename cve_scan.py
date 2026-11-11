@@ -24,8 +24,10 @@ import json
 import logging
 import os
 import re
+import shlex
 import socket
 import sys
+import time
 from datetime import datetime, timezone
 
 import cvelib
@@ -43,7 +45,18 @@ logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 DEFAULT_CVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cves")
 
 
+# Vendor-CLI commands (network gear) must go to the device as-is; everything else
+# is POSIX shell and is wrapped so a csh/tcsh login shell (pfSense, some FreeBSD
+# accounts) can't mangle `2>/dev/null`, `VAR=x cmd`, etc.
+CLI_PREFIXES = ("show ", "get system status")
+
+
+def sh_wrap(cmd: str) -> str:
+    return cmd if cmd.startswith(CLI_PREFIXES) else "/bin/sh -c " + shlex.quote(cmd)
+
+
 def ssh_exec(client, cmd: str, timeout: int = 15):
+    cmd = sh_wrap(cmd)
     stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
     out = stdout.read().decode(errors="replace").strip()
     err = stderr.read().decode(errors="replace").strip()
@@ -114,19 +127,35 @@ def detect_network_device(run) -> dict | None:
 
 
 def detect_freebsd_firewall(run, base_ver: str) -> dict | None:
-    """FreeBSD-based firewall distros: pfSense (CE/Plus) and OPNsense."""
-    _, plat, _ = run("cat /etc/platform 2>/dev/null")
-    if "pfsense" in plat.lower():
-        _, ver, _ = run("cat /etc/version 2>/dev/null")
+    """FreeBSD-based firewall distros: pfSense (CE/Plus) and OPNsense.
+
+    Uses several independent signals (platform file, pfSense-only paths, pfSense
+    packages, kernel ident) because no single one is guaranteed on every release.
+    No shell redirects: run() already captures stderr separately, and redirect
+    syntax breaks under csh/tcsh login shells."""
+    _, plat, _ = run("cat /etc/platform")
+    _, paths, _ = run("ls /etc/inc/globals.inc /usr/local/sbin/pfSense-upgrade "
+                      "/usr/local/share/pfSense /usr/local/pfSense /cf/conf/config.xml")
+    _, pkgs, _ = run("pkg info -x '^pfSense'")
+    _, uname_a, _ = run("uname -a")
+    is_pfsense = (
+        "pfsense" in plat.lower()
+        or "/etc/inc/globals.inc" in paths
+        or "pfSense-upgrade" in paths
+        or any(l.lower().startswith("pfsense") for l in pkgs.splitlines())
+        or re.search(r"RELENG_|plus-RELENG|pfSense", uname_a) is not None
+    )
+    if is_pfsense:
+        _, ver, _ = run("cat /etc/version")
         ver = ver.strip()
-        _, model, _ = run("kenv smbios.system.product 2>/dev/null")
+        _, model, _ = run("kenv smbios.system.product")
         plus = bool(re.match(r"\d{2}\.\d{2}", ver))   # Plus: 24.03; CE: 2.7.2
         info = _network_info("Netgate", "pfSense Plus" if plus else "pfSense CE",
                              ver, model.strip())
         info["role"] = "firewall"
         info["base_os"] = f"FreeBSD {base_ver}"
         return info
-    _, ons, _ = run("opnsense-version 2>/dev/null")
+    _, ons, _ = run("opnsense-version")
     if ons.strip().lower().startswith("opnsense"):
         m = re.match(r"OPNsense\s+(\S+)", ons.strip(), re.I)
         info = _network_info("OPNsense", "OPNsense", m.group(1) if m else "", "")
@@ -172,34 +201,6 @@ def detect_os(run) -> dict:
     return {"family": family, "os": pretty, "version": version}
 
 
-def probe_auth_methods(host: str, port: int, username: str, timeout: float):
-    """Ask sshd which auth methods it offers `username` (the SSH 'none' probe).
-    Needs no password. Returns a list such as ['publickey','password'], ['none']
-    if no auth is required, or None if the probe failed."""
-    try:
-        sock = socket.create_connection((host, port), timeout=timeout)
-    except OSError:
-        return None
-    t = paramiko.Transport(sock)
-    try:
-        t.banner_timeout = timeout
-        t.start_client(timeout=timeout)
-        try:
-            t.auth_none(username)
-            return ["none"]
-        except paramiko.BadAuthenticationType as e:
-            return list(e.allowed_types)
-        except paramiko.AuthenticationException:
-            return None
-    except Exception:  # noqa: BLE001 - any handshake problem == unknown
-        return None
-    finally:
-        try:
-            t.close()
-        except Exception:  # noqa: BLE001
-            pass
-
-
 def auth_policy(methods) -> str:
     if methods is None:
         return "unknown"
@@ -210,6 +211,38 @@ def auth_policy(methods) -> str:
     if "publickey" in methods:
         return "key_only"
     return "unknown"
+
+
+def try_login(host, port, username, password, timeout):
+    """One password login attempt on ONE connection (no pre-probe, so aggressive
+    sshguard/blacklistd/MaxStartups setups don't see extra half-open sessions).
+    Returns (kind, value): ("ok", client) | ("key_only", methods) |
+    ("denied", None) | ("error", message). Transient connection errors are
+    retried once after a short pause."""
+    err = ""
+    for attempt in (1, 2):
+        c = paramiko.SSHClient()
+        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            c.connect(
+                hostname=host, port=port, username=username, password=password,
+                timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
+                allow_agent=False, look_for_keys=False,
+            )
+            return "ok", c
+        except paramiko.BadAuthenticationType as e:
+            # Server doesn't offer password auth at all; it tells us what it does.
+            c.close()
+            return "key_only", list(e.allowed_types)
+        except paramiko.AuthenticationException:
+            c.close()
+            return "denied", None
+        except (socket.timeout, socket.error, paramiko.SSHException, OSError) as e:
+            c.close()
+            err = f"{type(e).__name__}: {e}"
+            if attempt == 1:
+                time.sleep(2)
+    return "error", err
 
 
 def port_open(host: str, port: int, timeout: float) -> bool:
@@ -232,38 +265,36 @@ def scan_host(host, port, creds, timeout, cve_mod, mitigation=False,
         return result
 
     client = None
-    auth_methods: dict = {}
+    key_only_methods: dict = {}     # username -> methods the server offered instead
+    denied = False
     for username, password in creds:
-        if username not in auth_methods:
-            auth_methods[username] = probe_auth_methods(host, port, username, timeout)
-        if auth_policy(auth_methods[username]) == "key_only":
-            continue  # password login is impossible; don't burn an attempt
-        c = paramiko.SSHClient()
-        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            c.connect(
-                hostname=host, port=port, username=username, password=password,
-                timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
-                allow_agent=False, look_for_keys=False,
-            )
-            client = c
+        if username in key_only_methods:
+            continue  # server told us password auth isn't offered for this user
+        kind, val = try_login(host, port, username, password, timeout)
+        if kind == "ok":
+            client = val
             result["username"] = username  # which account worked (never the password)
             break
-        except paramiko.AuthenticationException:
-            c.close()
-            continue
-        except (socket.timeout, socket.error, paramiko.SSHException, OSError) as e:
-            c.close()
+        if kind == "key_only":
+            key_only_methods[username] = val
+        elif kind == "denied":
+            denied = True
+        else:
             result["state"] = "ssh_error"
-            result["error"] = str(e)
+            result["error"] = val
             return result
-    who = result.get("username") or creds[0][0]
-    result["ssh_auth_methods"] = auth_methods.get(who)
-    result["ssh_auth_policy"] = auth_policy(auth_methods.get(who))
-    if client is None:
-        all_key_only = bool(auth_methods) and all(
-            auth_policy(m) == "key_only" for m in auth_methods.values())
-        result["state"] = "key_only" if all_key_only else "auth_failed"
+
+    if client is not None:
+        result["ssh_auth_policy"] = "password_allowed"
+    elif key_only_methods and not denied:
+        first = next(iter(key_only_methods.values()))
+        result["ssh_auth_methods"] = first
+        result["ssh_auth_policy"] = auth_policy(first)
+        result["state"] = "key_only"
+        return result
+    else:
+        result["ssh_auth_policy"] = "password_allowed" if denied else "unknown"
+        result["state"] = "auth_failed"
         return result
 
     def run(cmd, timeout_=15):
@@ -450,7 +481,9 @@ def main() -> None:
                 print(f"[+] {res['host']:<16} {state:<12} {res.get('username',''):<10} {res.get('os','?'):<26} "
                       f"{res.get('version',''):<14} CVE:{status}{extra}", file=sys.stderr)
             elif state in ("ssh_error", "info_error", "auth_failed", "key_only"):
-                print(f"[-] {res['host']:<16} {state}", file=sys.stderr)
+                print(f"[-] {res['host']:<16} {state}"
+                      + (f"  ({res['error']})" if res.get("error") else ""),
+                      file=sys.stderr)
             # port_closed: silent on screen
 
     def sort_key(r):

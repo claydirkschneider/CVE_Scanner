@@ -353,10 +353,11 @@ FreeBSD builds, so compare against the vendor's release, not stock FreeBSD versi
 
 ## Key-only SSH hosts
 
-Before logging in, the scanner asks sshd which auth methods it offers each username
-(an SSH `none` probe — no password needed). Result per host: `ssh_auth_methods` and
-`ssh_auth_policy` (`key_only` / `password_allowed` / `no_auth_required` / `unknown`,
-also a CSV column). Key-only hosts get state `key_only`, are **not** sent password
-attempts (so no lockout risk), and are listed in their own report section.
+During the normal password login (one connection per attempt, no extra probing),
+the scanner notices when sshd refuses password auth and reports which methods it
+offers instead. Result per host: `ssh_auth_methods` and `ssh_auth_policy`
+(`key_only` / `password_allowed` / `unknown`, also a CSV column). Key-only hosts get
+state `key_only`, no further password attempts, and their own report section.
+Transient connection errors are retried once; `ssh_error` lines now show the reason.
 `keyboard-interactive` counts as password-capable. Methods can differ per user
-(`Match User`), so each username in the creds file is probed.
+(`Match User`), so each username in the creds file is tried.
