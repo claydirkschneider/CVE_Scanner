@@ -202,21 +202,24 @@ def build(records: list[dict], cve: str, org: str, prepared_by: str,
         for os, n in sorted(os_counts.items(), key=lambda kv: (-kv[1], kv[0]))
     ) or '<tr><td colspan="2" class="note">—</td></tr>'
 
-    ko = sorted((r for r in records if r.get("state") == "key_only"),
+    na_states = {"key_only": "key-only SSH (password login disabled)",
+                 "sftp_only": "SFTP-only server (no shell)"}
+    ko = sorted((r for r in records if r.get("state") in na_states),
                 key=lambda r: [int(x) if x.isdigit() else 0
                                for x in str(r.get("host", "")).split(".")])
     if ko:
         ko_rows = "".join(
             f"<tr><td class='mono'>{esc(r.get('host'))}</td>"
-            f"<td class='note'>offers: {esc(', '.join(r.get('ssh_auth_methods') or []))}"
-            f"</td></tr>" for r in ko)
+            f"<td>{esc(na_states[r['state']])}</td>"
+            f"<td class='note mono'>{esc(r.get('ssh_banner', ''))}</td></tr>"
+            for r in ko)
         key_only_html = (
-            "<h3>Key-only SSH hosts (not audited)</h3>"
-            "<p class='note'>These hosts accept public-key login only, so a "
-            "password scan cannot assess them. Re-scan with key support or "
-            "check them manually.</p>"
-            "<table><thead><tr><th>Host</th><th>SSH methods offered</th></tr></thead>"
-            f"<tbody>{ko_rows}</tbody></table>")
+            "<h3>Hosts that could not be audited</h3>"
+            "<p class='note'>These hosts can't be assessed by a password scan: "
+            "key-only hosts need key support, and SFTP-only servers have no "
+            "shell. Check them manually against vendor advisories.</p>"
+            "<table><thead><tr><th>Host</th><th>Why</th><th>SSH banner</th></tr>"
+            f"</thead><tbody>{ko_rows}</tbody></table>")
     else:
         key_only_html = ""
 

@@ -204,6 +204,13 @@ def detect_os(run) -> dict:
     return {"family": family, "os": pretty, "version": version}
 
 
+def looks_sftp_only(banner: str) -> bool:
+    """SFTP-only appliances (e.g. 'SSH-2.0-S4SFTPServer_...') have no shell, so
+    commands can never run on them, whatever credentials we have."""
+    b = (banner or "").lower()
+    return "sftp" in b and "openssh" not in b
+
+
 def auth_policy(methods) -> str:
     if methods is None:
         return "unknown"
@@ -216,13 +223,21 @@ def auth_policy(methods) -> str:
     return "unknown"
 
 
-def try_login(host, port, username, password, timeout):
+def try_login(host, port, username, password, timeout, info=None):
     """One password login attempt on ONE connection (no pre-probe, so aggressive
     sshguard/blacklistd/MaxStartups setups don't see extra half-open sessions).
     Returns (kind, value): ("ok", client) | ("key_only", methods) |
     ("denied", None) | ("error", message). Transient connection errors are
     retried once after a short pause."""
     err = ""
+
+    def grab_banner(c):
+        try:
+            if info is not None and c.get_transport():
+                info["banner"] = c.get_transport().remote_version
+        except Exception:  # noqa: BLE001
+            pass
+
     for attempt in (1, 2):
         c = paramiko.SSHClient()
         c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -232,18 +247,21 @@ def try_login(host, port, username, password, timeout):
                 timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
                 allow_agent=False, look_for_keys=False,
             )
+            grab_banner(c)
             return "ok", c
         except paramiko.BadAuthenticationType as e:
             # paramiko raises this when password auth isn't offered, OR when it
             # fell back to keyboard-interactive and that failed (wrong password
             # on a PAM/RADIUS host). Only treat it as key-only when neither
             # password nor keyboard-interactive is on offer.
+            grab_banner(c)
             c.close()
             methods = list(e.allowed_types)
             if auth_policy(methods) == "key_only":
                 return "key_only", methods
             return "denied", None
         except paramiko.AuthenticationException:
+            grab_banner(c)
             c.close()
             return "denied", None
         except (socket.timeout, socket.error, paramiko.SSHException, OSError) as e:
@@ -274,12 +292,13 @@ def scan_host(host, port, creds, timeout, cve_mod, mitigation=False,
         return result
 
     client = None
+    info: dict = {}                 # filled by try_login (SSH banner)
     key_only_methods: dict = {}     # username -> methods the server offered instead
     denied = False
     for username, password in creds:
         if username in key_only_methods:
             continue  # server told us password auth isn't offered for this user
-        kind, val = try_login(host, port, username, password, timeout)
+        kind, val = try_login(host, port, username, password, timeout, info)
         if kind == "ok":
             client = val
             result["username"] = username  # which account worked (never the password)
@@ -292,6 +311,16 @@ def scan_host(host, port, creds, timeout, cve_mod, mitigation=False,
             result["state"] = "ssh_error"
             result["error"] = val
             return result
+
+    if info.get("banner"):
+        result["ssh_banner"] = info["banner"]
+    if looks_sftp_only(info.get("banner")):
+        if client is not None:
+            client.close()
+        result["state"] = "sftp_only"
+        result["note"] = ("SFTP-only server: no shell, so command-based CVE checks "
+                          "cannot run. Check the vendor's advisories manually.")
+        return result
 
     if client is not None:
         result["ssh_auth_policy"] = "password_allowed"
@@ -489,7 +518,7 @@ def main() -> None:
                     extra = f" MIT:{res['mitigation'].get('status', '?')}"
                 print(f"[+] {res['host']:<16} {state:<12} {res.get('username',''):<10} {res.get('os','?'):<26} "
                       f"{res.get('version',''):<14} CVE:{status}{extra}", file=sys.stderr)
-            elif state in ("ssh_error", "info_error", "auth_failed", "key_only"):
+            elif state in ("ssh_error", "info_error", "auth_failed", "key_only", "sftp_only"):
                 print(f"[-] {res['host']:<16} {state}"
                       + (f"  ({res['error']})" if res.get("error") else ""),
                       file=sys.stderr)
@@ -511,7 +540,7 @@ def main() -> None:
     with open(csv_path, "w", newline="") as f:
         wr = csv.writer(f)
         header = ["host", "state", "username", "os", "version", "family",
-                  "vendor", "model", "role", "ssh_auth_policy",
+                  "vendor", "model", "role", "ssh_auth_policy", "ssh_banner",
                   "cve", "cve_status", "details"]
         if args.mitigation_check:
             header += ["mitigation_status", "mitigation_details"]
@@ -521,7 +550,8 @@ def main() -> None:
             row = [
                 r["host"], r.get("state", ""), r.get("username", ""), r.get("os", ""), r.get("version", ""),
                 r.get("family", ""), r.get("vendor", ""), r.get("model", ""),
-                r.get("role", ""), r.get("ssh_auth_policy", ""), r.get("cve", "") if r.get("state") == "logged_in" else "",
+                r.get("role", ""), r.get("ssh_auth_policy", ""), r.get("ssh_banner", ""),
+                r.get("cve", "") if r.get("state") == "logged_in" else "",
                 cc.get("status", ""), json.dumps(cc.get("details", [])) if cc else "",
             ]
             if args.mitigation_check:
