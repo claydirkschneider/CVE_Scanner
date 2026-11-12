@@ -15,6 +15,9 @@ Verdict logic:
   * upstream version outside 2.4.55-2.4.70    -> ok (not in the affected range)
   * Debian 13 (trixie)                        -> compare to the fixed package version
   * FreeBSD apache*  (pkg, else httpd -v)    -> ports track upstream: compare to 2.4.71
+  * CentOS/RHEL/Rocky/Alma 8 and earlier      -> ok (Red Hat: not affected)
+  * RHEL-family 9+                            -> ok only if mod_http2's rpm changelog
+                                                 lists the CVE fix, else vulnerable
   * Debian 12/11, Ubuntu (in range), others   -> review: no confirmed fixed package
     version yet (distros backport, so upstream version alone can't prove "patched").
 Fill UBUNTU_FIXED / DEBIAN_FIXED as advisories are published and re-run.
@@ -40,6 +43,13 @@ DEBIAN_FIXED = {
 UBUNTU_FIXED = {
     # Ubuntu had not published a page for this CVE when this was written.
 }
+
+# RHEL-family (CentOS, RHEL, Rocky, AlmaLinux, Oracle). Red Hat: RHEL 8 and earlier are
+# NOT affected (their mod_http2 predates 2.0.8, which lacks the vulnerable code);
+# RHEL 9/10 shipped fixes in RHSA-2026:98981 (9) and RHSA-2026:98978 (10).
+RPM_FAMILIES = {"centos", "rhel", "rocky", "almalinux", "ol"}
+RPM_NOT_AFFECTED_MAJOR = 8
+RH_ADVISORY = "https://access.redhat.com/security/cve/cve-2026-119618"
 
 ADVISORY = {
     "debian": "https://security-tracker.debian.org/tracker/CVE-2026-119618",
@@ -81,8 +91,52 @@ def _find_apache(run, osinfo):
     return (None, None)
 
 
+def _major(osinfo):
+    m = re.match(r"(\d+)", osinfo.get("version", "") or "")
+    return int(m.group(1)) if m else None
+
+
+def _rpm_ver(run, name):
+    code, out, _ = run(f"rpm -q --qf '%{{VERSION}}-%{{RELEASE}}' {name}")
+    return out.strip() if code == 0 and out.strip() else None
+
+
+def _rpm_check(run, osinfo):
+    httpd = _rpm_ver(run, "httpd")
+    if httpd is None:
+        return {"status": "not_applicable",
+                "details": [{"note": "httpd (Apache) package not installed"}]}
+    major = _major(osinfo)
+    base = {"package": "httpd", "installed": httpd, "os": osinfo.get("os"),
+            "advisory": RH_ADVISORY}
+    if major is None:
+        return {"status": "review",
+                "details": [{**base, "note": "could not read the OS major version"}]}
+    if major <= RPM_NOT_AFFECTED_MAJOR:
+        return {"status": "ok",
+                "details": [{**base, "note": f"Red Hat: EL{major} (RHEL 8 and earlier) "
+                                             "is not affected - vulnerable mod_http2 "
+                                             "code not present"}]}
+    mod = _rpm_ver(run, "mod_http2")
+    if mod is None:
+        return {"status": "ok",
+                "details": [{**base, "note": "mod_http2 package not installed"}]}
+    _, changelog, _ = run("rpm -q --changelog mod_http2")
+    base["mod_http2"] = mod
+    if "CVE-2026-119618" in changelog:
+        return {"status": "ok",
+                "details": [{**base, "note": "mod_http2 changelog lists the "
+                                             "CVE-2026-119618 fix"}]}
+    return {"status": "vulnerable",
+            "details": [{**base, "note": "mod_http2 changelog has no CVE-2026-119618 "
+                                         "entry; run dnf update mod_http2 (RHEL 9: "
+                                         "RHSA-2026:98981, RHEL 10: RHSA-2026:98978)"}]}
+
+
 def cve_check(run, osinfo):
     family = osinfo["family"]
+    if family in RPM_FAMILIES:
+        return _rpm_check(run, osinfo)
     if family not in ("ubuntu", "debian", "freebsd"):
         return {"status": "review",
                 "details": [{"note": f"no check for OS family '{family}'; see "
@@ -136,15 +190,28 @@ def cve_check(run, osinfo):
 def mitigation_check(run, osinfo):
     """Exposure posture: the bug is in mod_http2, so no module / no h2 = no exposure."""
     family = osinfo["family"]
-    if family not in ("ubuntu", "debian", "freebsd"):
+    if family in RPM_FAMILIES:
+        if _rpm_ver(run, "httpd") is None:
+            return {"status": "not_applicable",
+                    "details": [{"note": "httpd (Apache) package not installed"}]}
+        major = _major(osinfo)
+        if major is not None and major <= RPM_NOT_AFFECTED_MAJOR:
+            return {"status": "not_applicable",
+                    "details": [{"note": "EL8 and earlier not affected (Red Hat)"}]}
+    elif family not in ("ubuntu", "debian", "freebsd"):
         return {"status": "not_applicable", "details": [{"note": "unsupported OS family"}]}
+    else:
+        pkg, inst = _find_apache(run, osinfo)
+        if inst is None:
+            return {"status": "not_applicable",
+                    "details": [{"note": "Apache HTTP Server package not installed"}]}
 
-    pkg, inst = _find_apache(run, osinfo)
-    if inst is None:
-        return {"status": "not_applicable",
-                "details": [{"note": "Apache HTTP Server package not installed"}]}
-
-    if family == "freebsd":
+    if family in RPM_FAMILIES:
+        conf = "/etc/httpd"
+        _, mods, _ = run(f"grep -rhE '^[[:space:]]*LoadModule[[:space:]]+http2_module' {conf}")
+        _, protos, _ = run(f"grep -rhiE '^[[:space:]]*Protocols[[:space:]]' {conf}")
+        loaded = bool(mods.strip())
+    elif family == "freebsd":
         conf = "/usr/local/etc/apache24"
         _, mods, _ = run(f"grep -rhE '^[[:space:]]*LoadModule[[:space:]]+http2_module' {conf}")
         _, protos, _ = run(f"grep -rhiE '^[[:space:]]*Protocols[[:space:]]' {conf}")
@@ -197,6 +264,18 @@ FreeBSD:
 doas pkg upgrade apache24
 doas service apache24 restart
 ```
+
+RHEL-family (CentOS, RHEL, Rocky, AlmaLinux, Oracle): **version 8 and earlier are not
+affected** (Red Hat). On 9 and 10 update `mod_http2`:
+
+```
+sudo dnf update mod_http2 && sudo systemctl restart httpd
+rpm -q --changelog mod_http2 | grep CVE-2026-119618    # confirm the fix is present
+```
+
+(RHEL 9: RHSA-2026:98981, RHEL 10: RHSA-2026:98978; Red Hat page:
+https://access.redhat.com/security/cve/cve-2026-119618.) CentOS Linux 7/8 are end of
+life - not affected by this CVE, but they no longer receive security fixes at all.
 
 Fixed packages published so far:
 
