@@ -12,8 +12,11 @@ Sources:
 
 Verdict logic:
   * apache not installed                      -> not_applicable
-  * upstream version outside 2.4.55-2.4.70    -> ok (not in the affected range)
-  * Debian 13 (trixie)                        -> compare to the fixed package version
+  * upstream version below 2.4.55             -> ok (Debian/FreeBSD); review (Ubuntu
+                                                 releases with no published fix)
+  * Debian 13, Ubuntu 20.04-26.10              -> compare to the fixed package version
+                                                 (checked BEFORE the upstream range: Ubuntu
+                                                 22.04 is fixed from upstream 2.4.52)
   * FreeBSD apache*  (pkg, else httpd -v)    -> ports track upstream: compare to 2.4.71
   * CentOS/RHEL/Rocky/Alma 8 and earlier      -> ok (Red Hat: not affected)
   * RHEL-family 9+                            -> ok only if mod_http2's rpm changelog
@@ -41,7 +44,11 @@ DEBIAN_FIXED = {
     # 11 (bullseye LTS): not tracked yet.
 }
 UBUNTU_FIXED = {
-    # Ubuntu had not published a page for this CVE when this was written.
+    "20.04": "2.4.41-4ubuntu3.23+esm11",  # focal - Ubuntu Pro (ESM) only
+    "22.04": "2.4.52-1ubuntu4.27",   # jammy  (note: fixed despite upstream < 2.4.55)
+    "24.04": "2.4.58-1ubuntu8.19",   # noble
+    "26.04": "2.4.66-2ubuntu2.8",    # resolute
+    "26.10": "2.4.68-1ubuntu6.2",    # stonking
 }
 
 # RHEL-family (CentOS, RHEL, Rocky, AlmaLinux, Oracle). Red Hat: RHEL 8 and earlier are
@@ -50,6 +57,9 @@ UBUNTU_FIXED = {
 RPM_FAMILIES = {"centos", "rhel", "rocky", "almalinux", "ol"}
 RPM_NOT_AFFECTED_MAJOR = 8
 RH_ADVISORY = "https://access.redhat.com/security/cve/cve-2026-119618"
+
+# Ubuntu lists these releases as "Not affected" (USN-9090-1 covers the fixes above).
+UBUNTU_NOT_AFFECTED = {"14.04", "16.04", "18.04"}
 
 ADVISORY = {
     "debian": "https://security-tracker.debian.org/tracker/CVE-2026-119618",
@@ -160,7 +170,28 @@ def cve_check(run, osinfo):
     advisory = ADVISORY.get(distro or "upstream")
     base["advisory"] = advisory
 
-    if not _in_range(up) and up < AFFECTED_FROM:
+    # Debian / Ubuntu: distro packages backport (and Ubuntu 22.04 is fixed even
+    # though its upstream 2.4.52 is below the affected range), so a published fixed
+    # package version always wins over the upstream version range.
+    if distro == "ubuntu" and rel in UBUNTU_NOT_AFFECTED:
+        return {"status": "ok",
+                "details": [{**base, "note": f"Ubuntu {rel} is listed as not affected"}]}
+    if family != "freebsd":
+        table = DEBIAN_FIXED if distro == "debian" else UBUNTU_FIXED
+        fixed = table.get(rel)
+        if fixed:
+            vulnerable = version_less_than(run, family, inst, fixed)
+            return {"status": "vulnerable" if vulnerable else "ok",
+                    "details": [{**base, "fixed_version": fixed}]}
+
+    if up < AFFECTED_FROM:
+        if distro == "ubuntu":
+            return {"status": "review",
+                    "details": [{**base, "note": f"Ubuntu {rel} has no published fix and "
+                                                 "its upstream version is below the "
+                                                 "affected range, but Ubuntu 22.04 was "
+                                                 "fixed from 2.4.52 - confirm at "
+                                                 f"{advisory}"}]}
         return {"status": "ok",
                 "details": [{**base, "note": "version predates the affected range "
                                              "(2.4.55+); not affected"}]}
@@ -171,14 +202,6 @@ def cve_check(run, osinfo):
             return {"status": "ok", "details": [{**base, "note": "at or above 2.4.71"}]}
         return {"status": "vulnerable",
                 "details": [{**base, "note": "upgrade apache24 to 2.4.71 or later"}]}
-
-    # Debian / Ubuntu: distro packages backport, so judge by the published fixed package.
-    table = DEBIAN_FIXED if distro == "debian" else UBUNTU_FIXED
-    fixed = table.get(rel)
-    if fixed:
-        vulnerable = version_less_than(run, family, inst, fixed)
-        return {"status": "vulnerable" if vulnerable else "ok",
-                "details": [{**base, "fixed_version": fixed}]}
 
     return {"status": "review",
             "details": [{**base, "note": f"upstream version is in the affected range "
@@ -280,10 +303,14 @@ life - not affected by this CVE, but they no longer receive security fixes at al
 Fixed packages published so far:
 
 - Debian 13 (trixie): apache2 2.4.71-1~deb13u1 (DSA-6620-1)
-- Debian 12 (bookworm), Debian 11, Ubuntu: no confirmed fixed package at the time
-  this definition was written - check
-  https://security-tracker.debian.org/tracker/CVE-2026-119618 and
-  https://ubuntu.com/security/CVE-2026-119618, then update the tables in this file.
+- Ubuntu 20.04: apache2 2.4.41-4ubuntu3.23+esm11 (Ubuntu Pro / ESM only);
+  18.04, 16.04 and 14.04: not affected. Ubuntu notice: USN-9090-1
+- Ubuntu 22.04: apache2 2.4.52-1ubuntu4.27 - 24.04: 2.4.58-1ubuntu8.19 -
+  26.04: 2.4.66-2ubuntu2.8 - 26.10: 2.4.68-1ubuntu6.2
+- Debian 12 (bookworm), Debian 11: no confirmed fixed package at the time this
+  definition was written - check
+  https://security-tracker.debian.org/tracker/CVE-2026-119618, then update
+  DEBIAN_FIXED in this file.
 - Upstream advisory: https://httpd.apache.org/security/vulnerabilities_24.html
 
 # Interim mitigation (reduces exposure, not a fix)
